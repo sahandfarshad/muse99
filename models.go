@@ -10,13 +10,17 @@ package main
 //
 // Provider quirks (documented in README too):
 //   - Spark / OpenAI / OpenRouter: /v1/models works with the key.
-//   - Gemini's OpenAI-compat endpoint: /v1/models is often limited
-//     or empty — then a small list of known Gemini models is shown
-//     as "suggested" instead of an empty dropdown.
+//   - Gemini (v6 fixes): the OpenAI-compat list can come back empty
+//     or 401 — then we retry with the native x-goog-api-key header
+//     and fall back to the native GET /v1beta/models endpoint, which
+//     answers {"models": [{"name": "models/gemini-2.5-flash"}]}.
+//     The "models/" prefix is stripped everywhere (list, test, save,
+//     chat), because chat completions need the bare id. Only if all
+//     of that fails do we show suggested models.
 //   - Ollama: /v1/models works, but if it fails we fall back to the
 //     native GET /api/tags and map tag names to model ids.
 //   - Any provider whose /models endpoint is blocked/empty: the UI
-//     keeps a manual text input as a fallback.
+//     shows a hidden manual-entry fallback, not a visible input.
 //
 // Security: API keys are never logged and never returned in any
 // endpoint response. The test endpoint only returns ok/model/
@@ -72,6 +76,26 @@ func modelCacheKey(baseURL string) string {
 
 // ---------- parsing ----------
 
+// normalizeModelID cleans a model id for use in chat completions.
+// Gemini's native API returns ids as "models/gemini-2.5-flash", but
+// chat completions (OpenAI-compatible or native) need the bare id
+// "gemini-2.5-flash" — sending the prefixed id fails with "model not
+// found". The same strip is applied everywhere a model id is saved
+// or sent, so a prefixed id can never leak into a request.
+func normalizeModelID(id string) string {
+	id = strings.TrimSpace(id)
+	for strings.HasPrefix(id, "models/") {
+		id = strings.TrimPrefix(id, "models/")
+	}
+	return id
+}
+
+// isGeminiBase reports whether a base URL / provider is Google Gemini.
+func isGeminiBase(baseURL, provider string) bool {
+	return strings.ToLower(strings.TrimSpace(provider)) == "gemini" ||
+		strings.Contains(strings.ToLower(baseURL), "generativelanguage.googleapis.com")
+}
+
 // parseModelsResponse parses a provider's model list, accepting the
 // shapes providers actually return:
 //   - OpenAI: {"data": [{"id": "...", "owned_by": "..."}]}
@@ -119,6 +143,7 @@ func parseModelItems(items []json.RawMessage) ([]ModelInfo, error) {
 	for _, raw := range items {
 		var s string
 		if err := json.Unmarshal(raw, &s); err == nil {
+			s = normalizeModelID(s)
 			if s != "" && !seen[s] {
 				seen[s] = true
 				out = append(out, ModelInfo{ID: s})
@@ -134,12 +159,15 @@ func parseModelItems(items []json.RawMessage) ([]ModelInfo, error) {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			continue
 		}
-		id := m.ID
+		// Gemini's native list uses "name": "models/gemini-2.5-flash";
+		// the OpenAI-compat list uses "id". Either way, strip the
+		// "models/" prefix — see normalizeModelID.
+		id := normalizeModelID(m.ID)
 		if id == "" {
-			id = m.Name
+			id = normalizeModelID(m.Name)
 		}
 		if id == "" {
-			id = m.Model
+			id = normalizeModelID(m.Model)
 		}
 		if id == "" || seen[id] {
 			continue
@@ -218,26 +246,78 @@ var modelsHTTP = &http.Client{Timeout: 15 * time.Second}
 
 // fetchModelsFromURL does one GET to an endpoint that should return a
 // model list. It never sends a key it was not given, and never logs one.
-func fetchModelsFromURL(url, apiKey string) ([]ModelInfo, error) {
-	req, err := http.NewRequest("GET", url, nil)
+//
+// Gemini auth quirk (v6): Google's OpenAI-compatible endpoint
+// accepts a Bearer key, but some Gemini keys / projects are only
+// accepted with the native `x-goog-api-key` header. So on a 401/403
+// from a Gemini endpoint, the request is retried once with that
+// header instead of Bearer. Other providers are unaffected.
+func fetchModelsFromURL(url, apiKey, provider string) ([]ModelInfo, error) {
+	doGet := func(useGoogKey bool) ([]ModelInfo, int, error) {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		req.Header.Set("Accept", "application/json")
+		// Local providers (Ollama) work without a key; the stored key is
+		// "ollama" there, which is harmless to send. Skip obviously
+		// placeholder keys so a local server is not confused by them.
+		if apiKey != "" && apiKey != "ollama" {
+			if useGoogKey {
+				req.Header.Set("x-goog-api-key", apiKey)
+			} else {
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+		}
+		resp, err := modelsHTTP.Do(req)
+		if err != nil {
+			return nil, 0, fmt.Errorf("could not reach %s: %w", url, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if resp.StatusCode >= 400 {
+			return nil, resp.StatusCode, fmt.Errorf("models endpoint returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		}
+		models, err := parseModelsResponse(body)
+		return models, resp.StatusCode, err
+	}
+	models, status, err := doGet(false)
+	if err != nil && (status == 401 || status == 403) && isGeminiBase(url, provider) {
+		if retry, _, rerr := doGet(true); rerr == nil {
+			return retry, nil
+		}
+	}
+	return models, err
+}
+
+// fetchGeminiNativeModels asks Gemini's native models.list endpoint
+// (GET /v1beta/models), which is the reliable list when the
+// OpenAI-compatible /models endpoint is empty or errors. It answers
+// {"models": [{"name": "models/gemini-2.5-flash", ...}]} — the
+// "models/" prefix is stripped by parseModelsResponse. Auth is the
+// native x-goog-api-key header. The native root is derived from the
+// provider base URL, so a test server can stand in for Google.
+func fetchGeminiNativeModels(apiKey, base string) ([]ModelInfo, error) {
+	root := "https://generativelanguage.googleapis.com/v1beta"
+	if !strings.Contains(base, "generativelanguage.googleapis.com") {
+		root = strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(base), "/"), "/openai")
+	}
+	req, err := http.NewRequest("GET", root+"/models", nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	// Local providers (Ollama) work without a key; the stored key is
-	// "ollama" there, which is harmless to send. Skip obviously
-	// placeholder keys so a local server is not confused by them.
-	if apiKey != "" && apiKey != "ollama" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	if apiKey != "" {
+		req.Header.Set("x-goog-api-key", apiKey)
 	}
 	resp, err := modelsHTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("could not reach %s: %w", url, err)
+		return nil, fmt.Errorf("could not reach Gemini models list: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("models endpoint returned %d: %s", resp.StatusCode, truncate(string(body), 200))
+		return nil, fmt.Errorf("Gemini models list returned %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	return parseModelsResponse(body)
 }
@@ -273,15 +353,23 @@ func fetchModelsLive(baseURL, apiKey, provider string) ([]ModelInfo, string, err
 	if strings.TrimSpace(apiKey) == "" && needsAPIKey(base, provider) {
 		return nil, "", fmt.Errorf("this provider needs an API key — add one in Settings first")
 	}
-	models, err := fetchModelsFromURL(base+"/models", apiKey)
+	models, err := fetchModelsFromURL(base+"/models", apiKey, provider)
 	if err == nil && len(models) > 0 {
 		return models, "live", nil
 	}
 	// Ollama fallback: native /api/tags (base is .../v1, strip it).
 	if strings.Contains(base, ":11434") || strings.ToLower(provider) == "ollama" {
 		root := strings.TrimSuffix(base, "/v1")
-		if tagged, terr := fetchModelsFromURL(root+"/api/tags", apiKey); terr == nil && len(tagged) > 0 {
+		if tagged, terr := fetchModelsFromURL(root+"/api/tags", apiKey, provider); terr == nil && len(tagged) > 0 {
 			return tagged, "live", nil
+		}
+	}
+	// Gemini fallback: the OpenAI-compatible /models endpoint often
+	// answers empty or errors for a key that works fine on the native
+	// API — ask the native models.list endpoint instead.
+	if isGeminiBase(base, provider) {
+		if native, nerr := fetchGeminiNativeModels(apiKey, base); nerr == nil && len(native) > 0 {
+			return native, "live", nil
 		}
 	}
 	if err != nil {
@@ -345,18 +433,22 @@ func getModels(baseURL, apiKey, provider string, force bool) (cachedModelList, e
 // testModel sends one tiny chat completion to a model and reports
 // whether it actually answers. Returns the reply, latency in ms,
 // and an error. The API key is never included in any return value.
-func testModel(baseURL, apiKey, model string) (reply string, latencyMs int64, err error) {
+func testModel(baseURL, apiKey, model, provider string) (reply string, latencyMs int64, err error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	model = normalizeModelID(model)
 	if base == "" {
 		return "", 0, fmt.Errorf("no API base URL set")
 	}
-	if strings.TrimSpace(model) == "" {
+	if model == "" {
 		return "", 0, fmt.Errorf("no model to test")
 	}
-	if strings.TrimSpace(apiKey) == "" && needsAPIKey(base, matchProvider(base, model)) {
+	if provider == "" {
+		provider = matchProvider(base, model)
+	}
+	if strings.TrimSpace(apiKey) == "" && needsAPIKey(base, provider) {
 		return "", 0, fmt.Errorf("this provider needs an API key — add one in Settings first")
 	}
-	c := NewClient(base, apiKey, model)
+	c := NewClientForProvider(base, apiKey, model, provider)
 	c.HTTP.Timeout = 60 * time.Second
 	start := time.Now()
 	msg, err := c.Chat([]Message{{Role: "user", Content: "Reply with the single word OK"}}, nil)
