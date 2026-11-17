@@ -170,7 +170,16 @@ func main() {
 	// Open the embedded database (chats, memories, usage). If it
 	// cannot open, keep going with the old file-only behaviour so a
 	// DB problem never stops the agent from starting.
-	if db, err := openAppDB(); err != nil {
+	//
+	// v7: when the web UI is already running in another process
+	// (the installer starts it detached, then opens this menu),
+	// that process owns the database — bbolt takes an exclusive
+	// lock, so opening it here would stall ~5s on the lock and
+	// then fall back to files anyway. Skip it: the menu works
+	// file-only, and the running web UI keeps the chats.
+	if externalWebRunning(cfg) {
+		fmt.Println("Note: web UI is already running in another process — it owns the database, so this menu runs without it.")
+	} else if db, err := openAppDB(); err != nil {
 		fmt.Println("Note: database could not be opened, using files only:", err)
 	} else {
 		defer db.Close()
@@ -241,7 +250,9 @@ func main() {
 				fmt.Println("Web server failed to start:", err)
 			}
 		}
-		showMenu(&cfg, client, runner, tools, system, ctrl)
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		showMenu(&cfg, client, runner, tools, system, ctrl, scanner)
 		return
 	}
 

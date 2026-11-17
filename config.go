@@ -226,6 +226,18 @@ func configFromRuntime(cfg Config) FileConfig {
 	return fc
 }
 
+// syncTopLevel copies the active provider's base URL / model / key
+// into the legacy top-level fields, so every reader sees the same
+// settings that are actually in use — whether they read the
+// providers map or the old single-provider fields.
+func syncTopLevel(fc FileConfig) FileConfig {
+	ap := fc.activeProvider()
+	fc.BaseURL = ap.BaseURL
+	fc.Model = ap.Model
+	fc.APIKey = ap.APIKey
+	return fc
+}
+
 // applyFileConfig copies the persisted provider / web settings into cfg.
 func applyFileConfig(cfg *Config, fc FileConfig) {
 	fc.ensureProviders()

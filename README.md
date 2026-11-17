@@ -58,8 +58,10 @@ Just run `muse99` over SSH:
   13 Chats
   14 Toggle shell commands
   16 Uninstall Muse99
-  17 Quit
+  0  Exit
 ```
+
+**0 is the exit**, and 0 also cancels out of any prompt inside the menu (a port, a domain, a password) instead of being taken as the value. The web UI started from the menu runs as its own process, so it keeps serving after you quit the menu.
 
 Everything the server needs is in the menu: start / stop / restart the web UI, change its port, set a domain, set up SSL with Let's Encrypt (it checks for certbot and for existing certificates first), update Muse99 itself to the latest release, and switch API providers. The web link on top shows `https://your-domain` once a domain and SSL are set, otherwise `http://<server-ip>:<port>`. Option 14 toggles shell commands (same setting as the web UI checkbox), and the menu header shows whether shell is ON or OFF. Inside Providers (option 9), **l** lists the current provider's models and lets you pick one by number, and **t** tests a model to see if it answers.
 
@@ -108,7 +110,7 @@ You never type a model name. In web **Settings → Provider & model**, choose a 
 
 The only typing left is a fallback that stays hidden until you need it: if Fetch returns no models at all, a link appears — "Fetch didn't return any models? Enter one manually" — and only then can you type a name.
 
-How it works: Muse99 calls the provider's `GET {base_url}/models` endpoint with your key (15 s timeout). The list is cached for 10 minutes and the last-known list is saved in the database, so the chooser still works offline after a restart — it says whether the list is live, cached, or suggested, and when it was fetched. Your API key is never shown, logged, or returned by any of these endpoints.
+How it works: Muse99 calls the provider's `GET {base_url}/models` endpoint with your key (15 s timeout). The list is cached for 10 minutes and the last-known list is saved in the database, so the chooser still works offline after a restart — it says whether the list is live, cached, or suggested, and when it was fetched. Opening Settings only ever shows the saved list; it never fetches live on its own, so a slow or unreachable provider can't make the Settings page hang — press **Fetch models** when you want a fresh list. Your API key is never shown, logged, or returned by any of these endpoints.
 
 Provider quirks:
 
@@ -182,7 +184,7 @@ Point your domain at the server (an A record to its IP), open ports 80 and 443, 
 
 ## Updating
 
-In the SSH menu, option 8 (Update Muse99) downloads the latest release binary, checks it runs `--help`, then replaces the current binary. Quit and run `muse99` again to use it. Or just run the one-line installer again — it does the same thing.
+In the SSH menu, option 8 (Update Muse99) downloads the latest release binary, checks it runs `--help`, then replaces the current binary — and **restarts the web UI from the new binary**, so the update actually takes effect. Or just run the one-line installer again — it does the same thing, and also restarts the web UI if it was already running. (The menu itself is still the old version until you quit with 0 and run `muse99` again.)
 
 ## Uninstalling
 

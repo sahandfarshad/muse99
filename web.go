@@ -875,7 +875,14 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			old.TLSEnabled = *body.TLSEnabled
 			s.cfg.TLSEnabled = *body.TLSEnabled
 		}
-		_ = saveFileConfig(old)
+		// Keep the legacy top-level fields in sync with the active
+		// provider, so GET /api/settings (and older readers) show
+		// the same base URL / model / key that is actually in use.
+		// (v7 fix: saving Settings used to update only
+		// providers[active], leaving the top-level fields empty —
+		// so the next GET showed a blank base URL and no model,
+		// as if no API settings had ever been saved.)
+		_ = saveFileConfig(syncTopLevel(old))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	fc := loadFileConfig()
@@ -906,7 +913,12 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	resp := map[string]any{
-		"base_url": fc.BaseURL, "model": fc.Model, "user_name": fc.UserName,
+		// v7: base_url / model come from the ACTIVE provider, not
+		// the legacy top-level fields — those are empty in any
+		// config written by the providers flow, so Settings used
+		// to show a blank base URL and "(none yet)" for the model
+		// even when a provider and key were saved.
+		"base_url": fc.activeProvider().BaseURL, "model": fc.activeProvider().Model, "user_name": fc.UserName,
 		"api_key_masked": activeMasked, "api_key_source": activeSource,
 		"config_path": configPath(),
 		"provider":    fc.ActiveProvider, "providers": providers,
@@ -916,7 +928,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	// Last-known model list for the active provider (from the DB
 	// cache only — loading Settings never makes a network call).
 	if appDB != nil {
-		if saved, ok := appDB.LoadModelList(fc.BaseURL); ok {
+		if saved, ok := appDB.LoadModelList(fc.activeProvider().BaseURL); ok {
 			resp["models"] = saved.Models
 			resp["models_source"] = saved.Source
 			resp["models_fetched_at"] = saved.FetchedAt.Format(time.RFC3339)
@@ -1136,7 +1148,7 @@ function cancelTestAll(){testAllCancel=true;}
 function showManualModel(e){e.preventDefault();document.getElementById('manual-model-box').style.display='block';document.getElementById('manual-model').focus();}
 async function saveManualModel(){const m=document.getElementById('manual-model').value.trim().replace(/^models\//,'');if(!m){modelStatus('Type a model name first.','bad');return;}await setActiveModel(m);document.getElementById('manual-model-box').style.display='none';}
 let settingsData=null;
-async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+' ('+(j.api_key_source||'none')+')<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';document.getElementById('set-base').value=j.base_url||'';activeModel=j.model||'';document.getElementById('active-model').textContent=j.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(j.api_key_masked||'(not set)')+(j.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':j.api_key_source==='saved'?' — saved in config.json':'');document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||3759;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';activeModel=p.model||'';document.getElementById('active-model').textContent=p.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(p.api_key_masked||'(not set)')+(p.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':p.api_key_source==='saved'?' — saved in config.json':'');}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}refreshModelList();}
+async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+' ('+(j.api_key_source||'none')+')<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';document.getElementById('set-base').value=j.base_url||'';activeModel=j.model||'';document.getElementById('active-model').textContent=j.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(j.api_key_masked||'(not set)')+(j.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':j.api_key_source==='saved'?' — saved in config.json':'');document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||3759;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';activeModel=p.model||'';document.getElementById('active-model').textContent=p.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(p.api_key_masked||'(not set)')+(p.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':p.api_key_source==='saved'?' — saved in config.json':'');}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}}
 async function saveSettings(){const b={active_provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value,user_name:document.getElementById('set-user').value,port:parseInt(document.getElementById('set-port').value||'3759'),domain:document.getElementById('set-domain').value,tls_enabled:document.getElementById('set-tls').checked,allow_shell:document.getElementById('set-shell').checked};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});alert('Saved — restart the web UI from the SSH menu if you changed the port or SSL.');loadSettings();loadStatus();}
 </script></body></html>
 `

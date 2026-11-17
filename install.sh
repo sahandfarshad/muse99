@@ -123,8 +123,11 @@ echo ""
 echo "Installed: $INSTALL_DIR/muse99"
 BIN="$INSTALL_DIR/muse99"
 
-# --- Start the web UI automatically (default port 3759) ---
+# --- Start (or restart) the web UI automatically (default port 3759) ---
 # A port already saved in ~/.muse99/config.json wins over the default.
+# v7: an already-running web UI is RESTARTED, not left alone — the
+# old process would keep serving the old binary forever, so an
+# update would never take effect until someone stopped it by hand.
 PORT=3759
 if [ -f "$HOME/.muse99/config.json" ]; then
   SAVED="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('port') or 3759)" "$HOME/.muse99/config.json" 2>/dev/null || echo 3759)"
@@ -134,24 +137,42 @@ LOG="$HOME/.muse99/web.log"
 mkdir -p "$HOME/.muse99"
 WEB_ADDR="http://localhost:$PORT"
 if [ -z "${MUSE99_NO_WEB:-}" ]; then
+  RESTARTED=0
   if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/status" >/dev/null 2>&1; then
-    echo "Web UI is already running on port $PORT."
-  else
-    nohup "$BIN" --menu=false --web >"$LOG" 2>&1 &
-    # Wait for the "Muse99 web UI: <address>" line (up to ~15s).
-    for _ in $(seq 1 30); do
-      if grep -q "Muse99 web UI:" "$LOG" 2>/dev/null; then break; fi
-      sleep 0.5
-    done
-    FOUND="$(grep -m1 "Muse99 web UI:" "$LOG" 2>/dev/null | sed 's/.*Muse99 web UI: //; s/ (TLS)//')"
-    if [ -n "$FOUND" ]; then WEB_ADDR="$FOUND"; fi
-    if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/status" >/dev/null 2>&1; then
-      echo "Web UI started: $WEB_ADDR"
+    echo "Web UI is already running on port $PORT — restarting it with the new version…"
+    if [ -f "$HOME/.muse99/web.pid" ]; then
+      OLDPID="$(cat "$HOME/.muse99/web.pid" 2>/dev/null || true)"
+      case "$OLDPID" in ''|*[!0-9]*) ;; *)
+        kill "$OLDPID" 2>/dev/null || true
+        for _ in $(seq 1 20); do kill -0 "$OLDPID" 2>/dev/null || break; sleep 0.25; done
+        kill -9 "$OLDPID" 2>/dev/null || true
+        ;;
+      esac
+      rm -f "$HOME/.muse99/web.pid"
     else
-      echo "WARNING: the web UI did not start on port $PORT — the port may already be in use." >&2
-      echo "Check the log: $LOG" >&2
-      echo "You can change the port in the SSH menu (option 5) and start it with option 1." >&2
+      pkill -f "$BIN --menu=false --web" 2>/dev/null || true
+      sleep 1
     fi
+    RESTARTED=1
+  fi
+  nohup "$BIN" --menu=false --web >"$LOG" 2>&1 &
+  # Wait for the "Muse99 web UI: <address>" line (up to ~15s).
+  for _ in $(seq 1 30); do
+    if grep -q "Muse99 web UI:" "$LOG" 2>/dev/null; then break; fi
+    sleep 0.5
+  done
+  FOUND="$(grep -m1 "Muse99 web UI:" "$LOG" 2>/dev/null | sed 's/.*Muse99 web UI: //; s/ (TLS)//')"
+  if [ -n "$FOUND" ]; then WEB_ADDR="$FOUND"; fi
+  if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/status" >/dev/null 2>&1; then
+    if [ "$RESTARTED" = 1 ]; then
+      echo "Web UI restarted: $WEB_ADDR"
+    else
+      echo "Web UI started: $WEB_ADDR"
+    fi
+  else
+    echo "WARNING: the web UI did not start on port $PORT — the port may already be in use." >&2
+    echo "Check the log: $LOG" >&2
+    echo "You can change the port in the SSH menu (option 5) and start it with option 1." >&2
   fi
 fi
 echo ""

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsSpark(t *testing.T) {
@@ -1333,5 +1335,119 @@ func TestKeySourceAndSavePreservesEnvKey(t *testing.T) {
 	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/settings", nil))
 	if !strings.Contains(rr.Body.String(), `"api_key_source":"saved"`) {
 		t.Fatalf("after saving, the key source should be saved, got %s", rr.Body.String())
+	}
+}
+
+// TestSettingsShowsActiveProvider is the regression test for the v7
+// "doesn't show me API settings" bug: GET /api/settings used to
+// return the legacy top-level base_url / model fields, which are
+// empty in any config written through the providers flow — so the
+// Settings page showed a blank base URL and no model even when a
+// provider and key were saved. It must return the ACTIVE provider's
+// values, and saving Settings must keep the top-level fields in sync.
+func TestSettingsShowsActiveProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// A config as the providers flow writes it: everything under
+	// providers[spark], top-level fields empty.
+	fc := FileConfig{}
+	fc.setProvider(Provider{Name: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", APIKey: "spark-key-9999"})
+	fc.ActiveProvider = "spark"
+	fc.BaseURL, fc.Model, fc.APIKey = "", "", ""
+	_ = saveFileConfig(fc)
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", APIKey: "spark-key-9999",
+		Providers: map[string]Provider{"spark": {Name: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", APIKey: "spark-key-9999"}}}
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
+	s := &webServer{client: NewClient(cfg.BaseURL, cfg.APIKey, cfg.Model), runner: runner, cfg: cfg,
+		messages: []Message{{Role: "system", Content: "s"}}, system: "s"}
+	mux := buildMux(s)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/settings", nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, `"base_url":"https://api.meta.ai/v1"`) {
+		t.Fatalf("settings should show the active provider's base URL, got %s", body)
+	}
+	if !strings.Contains(body, `"model":"muse-spark-1.3"`) {
+		t.Fatalf("settings should show the active provider's model, got %s", body)
+	}
+	if !strings.Contains(body, `"api_key_source":"saved"`) || !strings.Contains(body, "••••••••9999") {
+		t.Fatalf("settings should show the saved key (masked), got %s", body)
+	}
+	if strings.Contains(body, "spark-key-9999") {
+		t.Fatal("settings must never return the raw key")
+	}
+	// Saving Settings with a blank key must also sync the legacy
+	// top-level fields, so the next GET shows the same values.
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/settings", strings.NewReader(`{"active_provider":"spark","base_url":"https://api.meta.ai/v1","api_key":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rr, req)
+	if saved := loadFileConfig(); saved.BaseURL != "https://api.meta.ai/v1" || saved.Model != "muse-spark-1.3" {
+		t.Fatalf("saving settings must sync the top-level fields, got base=%q model=%q", saved.BaseURL, saved.Model)
+	}
+}
+
+// TestSettingsLoadDoesNotAutoFetchModels is the regression test for
+// the v7 Settings hang: loadSettings() used to end with a live
+// /api/models fetch, so opening Settings could stall up to ~45s on
+// a slow provider (compat list + fallbacks) before the page settled.
+func TestSettingsLoadDoesNotAutoFetchModels(t *testing.T) {
+	// The loadSettings() ending that used to fire a live fetch on
+	// every Settings open must be gone (the provider-change
+	// handler still refreshes — that one is an explicit action).
+	if strings.Contains(webHTML, "press Fetch models.','');}refreshModelList();}") {
+		t.Fatal("loadSettings must not auto-fetch the model list when Settings opens — Fetch models is an explicit button")
+	}
+	if !strings.Contains(webHTML, "press Fetch models.','');}}") {
+		t.Fatal("loadSettings should end after showing the cached-list note")
+	}
+}
+
+// TestPromptZeroCancels: typing 0 at a menu prompt cancels out of
+// it instead of being taken as the value; empty keeps the default.
+func TestPromptZeroCancels(t *testing.T) {
+	if v, ok := prompt(bufio.NewScanner(strings.NewReader("0\n")), "Web port", "3759"); ok || v != "" {
+		t.Fatalf("typing 0 should cancel the prompt, got (%q, %v)", v, ok)
+	}
+	if v, ok := prompt(bufio.NewScanner(strings.NewReader("\n")), "Web port", "3759"); !ok || v != "3759" {
+		t.Fatalf("empty answer should keep the default, got (%q, %v)", v, ok)
+	}
+	if v, ok := prompt(bufio.NewScanner(strings.NewReader("8080\n")), "Web port", "3759"); !ok || v != "8080" {
+		t.Fatalf("a typed value should be returned, got (%q, %v)", v, ok)
+	}
+}
+
+// TestMenuExitZero: 0 exits the SSH menu at once.
+func TestMenuExitZero(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", WebPort: 3759, WebAddr: "127.0.0.1"}
+	client := NewClient(cfg.BaseURL, "", cfg.Model)
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
+	ctrl := newWebController(cfg, client, runner, toolDefinitions(), "s")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scanner := bufio.NewScanner(strings.NewReader("0\n"))
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		showMenu(&cfg, client, runner, toolDefinitions(), "s", ctrl, scanner)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("menu did not exit on 0 within 5s")
+	}
+	// And 17 still exits, for muscle memory.
+	cfg2 := cfg
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		scanner := bufio.NewScanner(strings.NewReader("17\n"))
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		showMenu(&cfg2, client, runner, toolDefinitions(), "s", ctrl, scanner)
+	}()
+	select {
+	case <-done2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("menu did not exit on 17 within 5s")
 	}
 }

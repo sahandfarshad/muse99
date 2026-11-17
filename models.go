@@ -29,8 +29,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -345,6 +347,16 @@ func needsAPIKey(baseURL, provider string) bool {
 // "suggested"). An error means the provider could not be asked at
 // all; an empty live list falls back to suggested models where we
 // have them, and to an empty list otherwise.
+// isTimeoutErr reports whether an error is a network timeout.
+// The model fetch tries several endpoints in sequence (compat
+// list, then Ollama tags / Gemini native); a timeout on the first
+// one means the provider is unreachable or very slow, and burning
+// two more 15s attempts would make Settings feel hung. Fail fast.
+func isTimeoutErr(err error) bool {
+	var nerr net.Error
+	return errors.As(err, &nerr) && nerr.Timeout()
+}
+
 func fetchModelsLive(baseURL, apiKey, provider string) ([]ModelInfo, string, error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
@@ -354,6 +366,9 @@ func fetchModelsLive(baseURL, apiKey, provider string) ([]ModelInfo, string, err
 		return nil, "", fmt.Errorf("this provider needs an API key — add one in Settings first")
 	}
 	models, err := fetchModelsFromURL(base+"/models", apiKey, provider)
+	if err != nil && isTimeoutErr(err) {
+		return nil, "", err
+	}
 	if err == nil && len(models) > 0 {
 		return models, "live", nil
 	}

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -26,13 +27,19 @@ func httpGet(url string) (*http.Response, error) {
 // With a domain + SSL it shows https://your-domain, otherwise
 // http://<lan-ip>:<port>.
 //
-// Menu (v5):
-//   1 Start web UI   2 Terminal chat   3 Stop web UI   4 Restart web UI
-//   5 Choose web port   6 Set domain   7 Set up SSL / Let's Encrypt
-//   8 Update Muse99   9 Providers / API keys   10 Show memory
-//   11 Show usage   12 Show web address / status   13 Chats
-//   14 Toggle shell commands   15 (was Quit)   16 Uninstall Muse99
-//   17 Quit
+// Menu (v7):
+//   0 Exit   1 Start web UI   2 Terminal chat   3 Stop web UI
+//   4 Restart web UI   5 Choose web port   6 Set domain
+//   7 Set up SSL / Let's Encrypt   8 Update Muse99
+//   9 Providers / API keys   10 Show memory   11 Show usage
+//   12 Show web address / status   13 Chats
+//   14 Toggle shell commands   16 Uninstall Muse99
+//   (17 still exits, for muscle memory. 0 also cancels out of
+//   any prompt inside the menu.)
+//
+// The web UI started from the menu runs as its own process, so it
+// keeps serving after the menu quits. The menu hands its database
+// handle to that process first (one owner at a time).
 
 func webAddressFor(cfg Config) string {
 	if cfg.Domain != "" {
@@ -112,20 +119,27 @@ func pause(scanner *bufio.Scanner) {
 	scanner.Scan()
 }
 
-func prompt(scanner *bufio.Scanner, label, def string) string {
+func prompt(scanner *bufio.Scanner, label, def string) (string, bool) {
+	// Ask for one value. An empty answer keeps the default.
+	// Typing 0 cancels out of the prompt (ok=false) instead of
+	// being taken as a value — so 0 never becomes a port, a
+	// domain, or a password by accident.
 	if def != "" {
 		fmt.Printf("%s [%s]: ", label, def)
 	} else {
 		fmt.Printf("%s: ", label)
 	}
 	if !scanner.Scan() {
-		return def
+		return def, false
 	}
 	v := strings.TrimSpace(scanner.Text())
-	if v == "" {
-		return def
+	if v == "0" {
+		return "", false
 	}
-	return v
+	if v == "" {
+		return def, true
+	}
+	return v, true
 }
 
 // saveRuntimeConfig persists the live config (providers, port, domain, SSL).
@@ -134,7 +148,8 @@ func saveRuntimeConfig(cfg *Config) {
 }
 
 // refreshClient rebuilds the API client and system prompt after a
-// provider / key change, and restarts the web UI if it was running.
+// provider / key change, and restarts the web UI if it was running
+// so the new provider actually applies.
 func refreshClient(cfg *Config, client *Client, ctrl *webController, system *string, messages *[]Message) {
 	*client = *NewClient(cfg.BaseURL, cfg.APIKey, cfg.Model)
 	*system = systemPrompt(cfg.UserName, memoryContextFor("", cfg.MemoryPath), cfg.BaseURL, cfg.Model)
@@ -143,12 +158,85 @@ func refreshClient(cfg *Config, client *Client, ctrl *webController, system *str
 		if err := ctrl.Restart(*cfg, *system); err != nil {
 			fmt.Println("Web UI restart failed:", err)
 		}
+	} else if externalWebRunning(*cfg) {
+		// The web UI is a separate process: restart it from the
+		// new binary/config, so the provider change applies there
+		// too instead of only in this menu.
+		handOverDB()
+		if err := restartDetachedWeb(*cfg); err != nil {
+			fmt.Println("Web UI restart failed:", err)
+		} else {
+			fmt.Println("Web UI restarted with the new provider.")
+		}
 	}
 }
 
-func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, system string, ctrl *webController) {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+// startDetachedWeb launches the web UI as its own process, so it
+// keeps running after the menu quits. The child owns the database
+// — call handOverDB first so it can open it.
+func startDetachedWeb(cfg Config) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	_ = os.MkdirAll(configDir(), 0o700)
+	logFile, err := os.OpenFile(webLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	cmd := exec.Command(exe, "--menu=false", "--web", "--port", strconv.Itoa(cfg.WebPort), "--addr", cfg.WebAddr)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Reap the child when it exits, so it never lingers as a zombie.
+	go func() { _ = cmd.Wait() }()
+	_ = os.WriteFile(webPIDPath(), []byte(fmt.Sprint(cmd.Process.Pid)), 0o644)
+	// Wait until it answers (up to ~10s).
+	client := &http.Client{Timeout: 2 * time.Second}
+	for i := 0; i < 20; i++ {
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/status", cfg.WebPort))
+		if err == nil {
+			ok := resp.StatusCode == http.StatusOK
+			resp.Body.Close()
+			if ok {
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("web UI did not answer on port %d — see %s", cfg.WebPort, webLogPath())
+}
+
+// restartDetachedWeb stops a detached web UI (if any) and starts it
+// again from the current binary, so an install or update takes effect.
+func restartDetachedWeb(cfg Config) error {
+	if externalWebRunning(cfg) {
+		if err := stopExternalWeb(); err != nil {
+			return err
+		}
+	}
+	return startDetachedWeb(cfg)
+}
+
+// handOverDB closes the menu's database handle so a detached web UI
+// process can own it. The menu keeps working afterwards in
+// file-only mode (chat still works; chats are just not persisted
+// from the menu while the web UI owns the database).
+func handOverDB() {
+	if appDB != nil {
+		_ = appDB.Close()
+		appDB = nil
+	}
+}
+
+func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, system string, ctrl *webController, scanner *bufio.Scanner) {
 	messages := []Message{{Role: "system", Content: system}}
 
 	for {
@@ -167,10 +255,10 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 		fmt.Println("  12 Show web address / status")
 		fmt.Println("  13 Chats")
 		fmt.Println("  14 Toggle shell commands")
+		fmt.Println("  0  Exit")
 		fmt.Println("  16 Uninstall Muse99")
-		fmt.Println("  17 Quit")
 		fmt.Println()
-		fmt.Print("  Choose [1-17]: ")
+		fmt.Print("  Choose [0-16]: ")
 		if !scanner.Scan() {
 			return
 		}
@@ -182,11 +270,19 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			if ctrl.anyWebRunning(*cfg) {
 				fmt.Println("Web UI is already running at", webAddressFor(*cfg))
 			} else {
-				if err := ctrl.Start(*cfg); err != nil {
+				// v7: start it as its own process, so it keeps
+				// running after you quit this menu. An in-process
+				// web UI dies with the menu — that is why the UI
+				// used to vanish after a Restart + quit.
+				handOverDB()
+				if err := startDetachedWeb(*cfg); err != nil {
 					fmt.Println("Could not start web UI:", err)
+					if appDB == nil {
+						_, _ = openAppDB()
+					}
 				} else {
-					fmt.Println("Starting web UI…")
-					fmt.Println("Open in your browser:", webAddressFor(*cfg))
+					fmt.Println("Web UI started at", webAddressFor(*cfg))
+					fmt.Println("It keeps running after you quit this menu.")
 					fmt.Println("Also try: http://localhost:" + fmt.Sprint(cfg.WebPort))
 				}
 			}
@@ -217,18 +313,35 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			pause(scanner)
 
 		case "4":
-			if !ctrl.IsRunning() && externalWebRunning(*cfg) {
-				_ = stopExternalWeb()
-			}
-			if err := ctrl.Restart(*cfg, system); err != nil {
-				fmt.Println("Could not restart web UI:", err)
+			if ctrl.IsRunning() {
+				// Started with `muse99 --web`: the web UI lives
+				// in this process — restart it in place.
+				if err := ctrl.Restart(*cfg, system); err != nil {
+					fmt.Println("Could not restart web UI:", err)
+				} else {
+					fmt.Println("Web UI restarted at", webAddressFor(*cfg))
+				}
 			} else {
-				fmt.Println("Web UI restarted at", webAddressFor(*cfg))
+				handOverDB()
+				if err := restartDetachedWeb(*cfg); err != nil {
+					fmt.Println("Could not restart web UI:", err)
+					if appDB == nil {
+						_, _ = openAppDB()
+					}
+				} else {
+					fmt.Println("Web UI restarted at", webAddressFor(*cfg))
+					fmt.Println("It keeps running after you quit this menu.")
+				}
 			}
 			pause(scanner)
 
 		case "5":
-			portStr := prompt(scanner, "Web port", fmt.Sprint(cfg.WebPort))
+			portStr, ok := prompt(scanner, "Web port (0 to cancel)", fmt.Sprint(cfg.WebPort))
+			if !ok {
+				fmt.Println("Cancelled — nothing changed.")
+				pause(scanner)
+				continue
+			}
 			port, err := strconv.Atoi(portStr)
 			if err != nil || port < 1 || port > 65535 {
 				fmt.Println("That is not a valid port (1-65535). Nothing changed.")
@@ -250,7 +363,12 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			pause(scanner)
 
 		case "6":
-			domain := prompt(scanner, "Domain (example: muse99.example.com, blank to clear)", cfg.Domain)
+			domain, ok := prompt(scanner, "Domain (example: muse99.example.com, blank to clear, 0 to cancel)", cfg.Domain)
+			if !ok {
+				fmt.Println("Cancelled — nothing changed.")
+				pause(scanner)
+				continue
+			}
 			cfg.Domain = strings.TrimSpace(domain)
 			saveRuntimeConfig(cfg)
 			if cfg.Domain == "" {
@@ -272,7 +390,29 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 				fmt.Println("You can also run the installer again:")
 				fmt.Println("  curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash")
 			} else {
-				fmt.Println("Update done. Quit the menu (option 17) and run muse99 again to use the new version.")
+				fmt.Println("Update done.")
+				// v7: always restart the app after an update, so
+				// the new version is the one actually serving —
+				// the old process used to keep running the old
+				// binary until someone stopped it by hand.
+				if ctrl.IsRunning() {
+					if err := ctrl.Restart(*cfg, system); err != nil {
+						fmt.Println("Web UI restart failed:", err)
+					} else {
+						fmt.Println("Web UI restarted with the new version.")
+					}
+				} else {
+					handOverDB()
+					if err := restartDetachedWeb(*cfg); err != nil {
+						fmt.Println("Web UI restart failed:", err)
+						if appDB == nil {
+							_, _ = openAppDB()
+						}
+					} else {
+						fmt.Println("Web UI restarted with the new version.")
+					}
+				}
+				fmt.Println("Note: this menu is still the old version — quit (0) and run muse99 again for the new menu.")
 			}
 			pause(scanner)
 
@@ -362,12 +502,13 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			}
 			pause(scanner)
 
-		case "17", "q", "quit", "exit":
-			fmt.Println("Bye, " + cfg.UserName + ".")
+		case "0", "17", "q", "quit", "exit":
+			// 0 is the exit (17 still works, for muscle memory).
+			// The web UI keeps running if it was started detached.
 			return
 
 		default:
-			fmt.Println("Please choose 1-17.")
+			fmt.Println("Please choose 0-16.")
 			pause(scanner)
 		}
 	}
@@ -437,15 +578,15 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 		fmt.Println("  a  Add / update a provider key")
 		fmt.Println("  l  List models for the current provider")
 		fmt.Println("  t  Test a model (does it answer?)")
-		fmt.Println("  b  Back to main menu")
-		fmt.Print("  Choose [s/a/l/t/b]: ")
+		fmt.Println("  0  Back to main menu")
+		fmt.Print("  Choose [s/a/l/t/0]: ")
 		if !scanner.Scan() {
 			return
 		}
 		choice := strings.ToLower(strings.TrimSpace(scanner.Text()))
 		fmt.Println()
 		switch choice {
-		case "b", "back", "":
+		case "0", "b", "back", "":
 			return
 		case "l", "list":
 			// Fetch the current provider's models and offer to pick one.
@@ -466,7 +607,11 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 				}
 				fmt.Printf("  %s %2d  %s\n", mark, i+1, m.ID)
 			}
-			pick := prompt(scanner, "Pick a model number (Enter to keep "+cfg.Model+")", "")
+			pick, ok := prompt(scanner, "Pick a model number (Enter to keep "+cfg.Model+", 0 to cancel)", "")
+			if !ok {
+				fmt.Println("Cancelled — model unchanged.")
+				continue
+			}
 			if n, err := strconv.Atoi(strings.TrimSpace(pick)); err == nil && n >= 1 && n <= len(list.Models) {
 				cfg.Model = normalizeModelID(list.Models[n-1].ID)
 				if cfg.Providers != nil {
@@ -479,7 +624,12 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 				fmt.Println("Model is now", cfg.Model)
 			}
 		case "t", "test":
-			model := normalizeModelID(prompt(scanner, "Model to test", cfg.Model))
+			model, ok := prompt(scanner, "Model to test (0 to cancel)", cfg.Model)
+			if !ok {
+				fmt.Println("Cancelled.")
+				continue
+			}
+			model = normalizeModelID(model)
 			fmt.Printf("Testing %s …\n", model)
 			reply, latency, err := testModel(cfg.BaseURL, cfg.APIKey, model, cfg.Provider)
 			if err != nil {
@@ -488,7 +638,11 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 			}
 			fmt.Printf("  ✓ works — replied %q in %d ms\n", reply, latency)
 		case "s", "switch":
-			which := prompt(scanner, "Provider number or name", cfg.Provider)
+			which, ok := prompt(scanner, "Provider number or name (0 to cancel)", cfg.Provider)
+			if !ok {
+				fmt.Println("Cancelled — provider unchanged.")
+				continue
+			}
 			name := which
 			if n, err := strconv.Atoi(which); err == nil && n >= 1 && n <= len(names) {
 				name = names[n-1]
@@ -504,7 +658,11 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 			refreshClient(cfg, client, ctrl, system, messages)
 			fmt.Println("Switched to", name, "· model", cfg.Model, "· key:", maskKey(cfg.APIKey))
 		case "a", "add":
-			which := prompt(scanner, "Provider (spark, openai, gemini, openrouter, ollama, custom)", cfg.Provider)
+			which, ok := prompt(scanner, "Provider (spark, openai, gemini, openrouter, ollama, custom — 0 to cancel)", cfg.Provider)
+			if !ok {
+				fmt.Println("Cancelled — nothing saved.")
+				continue
+			}
 			preset, ok := providerPreset(which)
 			if !ok {
 				fmt.Println("Unknown provider:", which)
@@ -518,14 +676,33 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 				p.Model = preset.Model
 			}
 			if which == "custom" {
-				p.BaseURL = prompt(scanner, "API base URL", p.BaseURL)
-				p.Model = normalizeModelID(prompt(scanner, "Model", p.Model))
+				base, ok := prompt(scanner, "API base URL (0 to cancel)", p.BaseURL)
+				if !ok {
+					fmt.Println("Cancelled — nothing saved.")
+					continue
+				}
+				p.BaseURL = base
+				mdl, ok := prompt(scanner, "Model (0 to cancel)", p.Model)
+				if !ok {
+					fmt.Println("Cancelled — nothing saved.")
+					continue
+				}
+				p.Model = normalizeModelID(mdl)
 			} else {
-				if m := prompt(scanner, "Model (Enter to keep "+p.Model+")", p.Model); m != "" {
+				m, ok := prompt(scanner, "Model (Enter to keep "+p.Model+", 0 to cancel)", p.Model)
+				if !ok {
+					fmt.Println("Cancelled — nothing saved.")
+					continue
+				}
+				if m != "" {
 					p.Model = normalizeModelID(m)
 				}
 			}
-			key := prompt(scanner, "API key (Enter to keep the saved one)", "")
+			key, ok := prompt(scanner, "API key (Enter to keep the saved one, 0 to cancel)", "")
+			if !ok {
+				fmt.Println("Cancelled — nothing saved.")
+				continue
+			}
 			if key != "" {
 				p.APIKey = key
 			}
@@ -564,7 +741,11 @@ func setupSSL(cfg *Config, ctrl *webController, scanner *bufio.Scanner, system s
 		fmt.Println("Certificate already found:")
 		fmt.Println("  ", cert)
 		fmt.Println("  ", key)
-		ans := prompt(scanner, "Enable HTTPS with this certificate? (y/n)", "y")
+		ans, ok := prompt(scanner, "Enable HTTPS with this certificate? (y/n, 0 to cancel)", "y")
+		if !ok {
+			fmt.Println("Cancelled — nothing changed.")
+			return
+		}
 		if strings.ToLower(ans) == "y" || strings.ToLower(ans) == "yes" {
 			cfg.TLSEnabled = true
 			cfg.CertFile, cfg.KeyFile = cert, key
@@ -583,7 +764,11 @@ func setupSSL(cfg *Config, ctrl *webController, scanner *bufio.Scanner, system s
 		return
 	}
 	fmt.Println("certbot is installed.")
-	email := prompt(scanner, "Email for Let's Encrypt (expiry notices)", "")
+	email, ok := prompt(scanner, "Email for Let's Encrypt (expiry notices, 0 to cancel)", "")
+	if !ok {
+		fmt.Println("Cancelled — nothing changed.")
+		return
+	}
 	if email == "" {
 		fmt.Println("An email is required by certbot. Nothing changed.")
 		return
