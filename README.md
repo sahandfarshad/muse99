@@ -102,20 +102,21 @@ Muse99 is built for a small server — a 1 GB RAM Ubuntu 22.04 box is fine:
 
 Why bbolt and not SQLite: the current SQLite driver (modernc.org/sqlite v1.62) needs the Go 1.26 toolchain, while this project and its CI pin Go 1.23, and it would add ~10 MB to the binary. bbolt builds on Go 1.23 and adds ~1 MB. If a future SQLite driver supports Go 1.23 again, the database layer is one file (`db.go`) and can be swapped.
 
-## Models — pick one, don't type one
+## Models — fetch, click to test, set active
 
-You never have to type a model name by hand. In web **Settings → Provider & model**, choose a provider, press **Fetch models**, and pick from the list that the provider itself returns. Type in the filter box to narrow a long list. Press **Test** and Muse99 sends one tiny message ("Reply with the single word OK") to that model and tells you whether it answers and how fast — so you can try models one by one and see which works, before saving. Saving stores that model for the provider, exactly as typing it would.
+You never type a model name. In web **Settings → Provider & model**, choose a provider, paste its API key, press **Fetch models** — and the provider's own list appears as clickable rows. Click a row (or its **Test** button) and Muse99 sends one tiny message ("Reply with the single word OK") to that model and shows, right on the row, whether it answers, how fast, and what it replied. Press **Set active** on the one you want and that is the model Muse99 chats with from then on — the row gets an ACTIVE badge and the header updates at once. **Test all** tests the first 20 models one by one, so you can see at a glance which ones work. Type in the filter box to narrow a long list.
+
+The only typing left is a fallback that stays hidden until you need it: if Fetch returns no models at all, a link appears — "Fetch didn't return any models? Enter one manually" — and only then can you type a name.
 
 How it works: Muse99 calls the provider's `GET {base_url}/models` endpoint with your key (15 s timeout). The list is cached for 10 minutes and the last-known list is saved in the database, so the chooser still works offline after a restart — it says whether the list is live, cached, or suggested, and when it was fetched. Your API key is never shown, logged, or returned by any of these endpoints.
 
 Provider quirks:
 
 - **Spark, OpenAI, OpenRouter:** `/v1/models` works with the key.
-- **Gemini:** the OpenAI-compatible endpoint often returns an empty list — then Muse99 shows suggested models (`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`) instead of an empty dropdown.
+- **Gemini:** the OpenAI-compatible list endpoint is flaky — it can come back empty, or refuse a key that works fine elsewhere. Muse99 now works around that three ways: (1) on a 401/403 it retries with Gemini's native `x-goog-api-key` header instead of Bearer, for the list *and* for chat; (2) if the compatible list is empty or errors, it asks Gemini's native `GET /v1beta/models` list instead; (3) Gemini's native list returns ids as `models/gemini-2.5-flash`, and that `models/` prefix is stripped everywhere — list, test, save, and chat — because chat completions need the bare id `gemini-2.5-flash` (sending the prefixed id fails with "model not found"). Only if all of that fails does Muse99 show suggested models (`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`). If Gemini still won't connect, check: the key comes from [Google AI Studio](https://aistudio.google.com/apikey) (a plain API key, not an OAuth token), the base URL is exactly `https://generativelanguage.googleapis.com/v1beta/openai/`, and the key is pasted in Settings and saved — the Settings page now also says whether the key in use came from config.json ("saved") or from the environment ("env"; pressing Save settings keeps it in config.json).
 - **Ollama:** `/v1/models` works; if it fails, Muse99 falls back to Ollama's native `GET /api/tags` and maps tag names to model ids. No key needed.
-- **Any provider whose list is blocked or empty:** the model box stays a plain text input — just type any model name, it still works.
 
-The same thing is in the SSH menu, Providers (option 9): **l** lists the current provider's models and lets you pick one by number, **t** tests a model. API endpoints, for scripts: `GET /api/models?provider=spark`, `POST /api/models/refresh {provider, base_url, api_key}`, `POST /api/models/test {provider|base_url, api_key, model}` → `{ok, model, latency_ms, reply, error}`.
+The same thing is in the SSH menu, Providers (option 9): **l** lists the current provider's models and lets you pick one by number, **t** tests a model. API endpoints, for scripts: `GET /api/models?provider=spark`, `POST /api/models/refresh {provider, base_url, api_key}`, `POST /api/models/test {provider|base_url, api_key, model}` → `{ok, model, latency_ms, reply, error}`, `POST /api/models/active {provider|base_url, api_key, model}` → `{ok, model, provider}`.
 
 ## Web UI — minimal, slick, modern
 
