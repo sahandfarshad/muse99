@@ -601,3 +601,298 @@ func TestWebChatsPersistAcrossRestart(t *testing.T) {
 		}
 	}
 }
+
+// ---------- v4: model discovery ----------
+
+func TestParseModelsResponse(t *testing.T) {
+	// OpenAI shape.
+	m, err := parseModelsResponse([]byte(`{"data":[{"id":"gpt-5","owned_by":"openai"},{"id":"gpt-4o","owned_by":"openai"}],"object":"list"}`))
+	if err != nil || len(m) != 2 || m[0].ID != "gpt-5" || m[0].OwnedBy != "openai" {
+		t.Fatalf("OpenAI shape: models=%+v err=%v", m, err)
+	}
+	// Ollama native /api/tags shape.
+	m, err = parseModelsResponse([]byte(`{"models":[{"name":"llama3.1:latest","model":"llama3.1:latest"},{"name":"mistral:7b"}]}`))
+	if err != nil || len(m) != 2 || m[0].ID != "llama3.1:latest" {
+		t.Fatalf("Ollama tags shape: models=%+v err=%v", m, err)
+	}
+	// Plain array of strings.
+	m, err = parseModelsResponse([]byte(`["a","b","a"]`))
+	if err != nil || len(m) != 2 {
+		t.Fatalf("string array: models=%+v err=%v", m, err)
+	}
+	// Empty data is not an error — the caller falls back to suggestions.
+	m, err = parseModelsResponse([]byte(`{"data":[]}`))
+	if err != nil || len(m) != 0 {
+		t.Fatalf("empty data: models=%+v err=%v", m, err)
+	}
+	// Malformed JSON is an error.
+	if _, err := parseModelsResponse([]byte(`{not json`)); err == nil {
+		t.Fatal("malformed JSON should be an error")
+	}
+	if _, err := parseModelsResponse([]byte(``)); err == nil {
+		t.Fatal("empty body should be an error")
+	}
+	// Duplicates are dropped.
+	m, err = parseModelsResponse([]byte(`{"data":[{"id":"x"},{"id":"x"},{"id":"y"}]}`))
+	if err != nil || len(m) != 2 {
+		t.Fatalf("duplicates: models=%+v err=%v", m, err)
+	}
+}
+
+func TestFetchModelsLive(t *testing.T) {
+	// Happy path: /v1/models returns a list.
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer k1" {
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"error":"bad key"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"muse-spark-1.3"},{"id":"muse-spark-1.3-contributor"}]}`)
+	}))
+	defer ok.Close()
+	models, source, err := fetchModelsLive(ok.URL, "k1", "spark")
+	if err != nil || source != "live" || len(models) != 2 || models[0].ID != "muse-spark-1.3" {
+		t.Fatalf("live fetch: models=%+v source=%s err=%v", models, source, err)
+	}
+	// Wrong key: a clear error, not an empty list.
+	if _, _, err := fetchModelsLive(ok.URL, "wrong", "spark"); err == nil {
+		t.Fatal("401 from /models should be an error")
+	}
+	// No key for a cloud provider: clear error before any request.
+	if _, _, err := fetchModelsLive(ok.URL, "", "spark"); err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Fatalf("missing key should say so, got %v", err)
+	}
+	// Ollama fallback: /v1/models 404s, /api/tags answers.
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/api/tags" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"models":[{"name":"llama3.1:latest"},{"name":"mistral:7b"}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ollama.Close()
+	models, source, err = fetchModelsLive(ollama.URL+"/v1", "", "ollama")
+	if err != nil || source != "live" || len(models) != 2 || models[0].ID != "llama3.1:latest" {
+		t.Fatalf("ollama fallback: models=%+v source=%s err=%v", models, source, err)
+	}
+	// Gemini: live endpoint answers but lists nothing -> suggested models.
+	gem := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer gem.Close()
+	models, source, err = fetchModelsLive(gem.URL, "k1", "gemini")
+	if err != nil || source != "suggested" || len(models) == 0 || models[0].ID != "gemini-2.5-flash" {
+		t.Fatalf("gemini suggested: models=%+v source=%s err=%v", models, source, err)
+	}
+}
+
+// mockProviderServer serves /models and /chat/completions for tests.
+func mockProviderServer(t *testing.T, models []string, reply string, failModels bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/models"):
+			if failModels {
+				w.WriteHeader(401)
+				fmt.Fprint(w, `{"error":{"message":"bad key"}}`)
+				return
+			}
+			data := []any{}
+			for _, id := range models {
+				data = append(data, map[string]any{"id": id})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+		case strings.HasSuffix(r.URL.Path, "/chat/completions"):
+			if r.Header.Get("Authorization") != "Bearer test-key-123" {
+				w.WriteHeader(401)
+				fmt.Fprint(w, `{"error":{"message":"bad key"}}`)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": reply}}},
+				"usage":   map[string]any{"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestModelsHandler(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearModelCache()
+	db := openTestDB(t)
+	oldDB := appDB
+	appDB = db
+	defer func() { appDB = oldDB }()
+
+	mock := mockProviderServer(t, []string{"model-a", "model-b"}, "OK", false)
+	// Keep the URL around; the server is closed later to test fallback.
+	mockURL := mock.URL
+
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "mock",
+		Providers: map[string]Provider{"mock": {Name: "mock", BaseURL: mockURL, Model: "model-a", APIKey: "test-key-123"}}}
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
+	s := &webServer{client: NewClient(mockURL, "test-key-123", "model-a"), runner: runner, cfg: cfg,
+		messages: []Message{{Role: "system", Content: "s"}}, system: "s", db: db}
+	mux := buildMux(s)
+
+	getModels := func() modelListResp {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/models?provider=mock", nil))
+		if rr.Code != 200 {
+			t.Fatalf("GET /api/models = %d %s", rr.Code, rr.Body.String())
+		}
+		var resp modelListResp
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// Live list.
+	resp := getModels()
+	if resp.Error != "" || resp.Source != "live" || len(resp.Models) != 2 || resp.Models[0].ID != "model-a" {
+		t.Fatalf("live list wrong: %+v", resp)
+	}
+	// Second call comes from the in-memory cache.
+	resp = getModels()
+	if resp.Source != "cached" || len(resp.Models) != 2 {
+		t.Fatalf("cached list wrong: %+v", resp)
+	}
+	// Provider is now down: in-memory cache still answers…
+	mock.Close()
+	resp = getModels()
+	if len(resp.Models) != 2 {
+		t.Fatalf("cache should survive the provider going down: %+v", resp)
+	}
+	// …and so does the persisted list, once the memory cache is cleared.
+	clearModelCache()
+	resp = getModels()
+	if resp.Source != "cached" || len(resp.Models) != 2 {
+		t.Fatalf("persisted list should survive restart: %+v", resp)
+	}
+	// Force refresh while down: still falls back to the persisted list.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/models/refresh", strings.NewReader(`{"provider":"mock"}`))
+	mux.ServeHTTP(rr, req)
+	var fres modelListResp
+	if err := json.NewDecoder(rr.Body).Decode(&fres); err != nil {
+		t.Fatal(err)
+	}
+	if len(fres.Models) != 2 {
+		t.Fatalf("refresh fallback should return the persisted list: %+v", fres)
+	}
+	// Unknown provider with no key: a clear error, no models.
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/models?provider=spark", nil))
+	var errResp modelListResp
+	if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
+		t.Fatal(err)
+	}
+	if errResp.Error == "" || !strings.Contains(errResp.Error, "API key") {
+		t.Fatalf("missing key should be a clear error: %+v", errResp)
+	}
+}
+
+func TestModelTestHandler(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearModelCache()
+	mock := mockProviderServer(t, []string{"model-a"}, "OK", false)
+	defer mock.Close()
+
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "mock",
+		Providers: map[string]Provider{"mock": {Name: "mock", BaseURL: mock.URL, Model: "model-a", APIKey: "test-key-123"}}}
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
+	s := &webServer{client: NewClient(mock.URL, "test-key-123", "model-a"), runner: runner, cfg: cfg,
+		messages: []Message{{Role: "system", Content: "s"}}, system: "s"}
+	mux := buildMux(s)
+
+	post := func(body string) (int, string) {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/models/test", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		mux.ServeHTTP(rr, req)
+		return rr.Code, rr.Body.String()
+	}
+	// Success: ok, reply OK, latency present, key never echoed.
+	code, body := post(`{"provider":"mock","model":"model-a"}`)
+	if code != 200 {
+		t.Fatalf("test = %d %s", code, body)
+	}
+	var okResp map[string]any
+	if err := json.Unmarshal([]byte(body), &okResp); err != nil {
+		t.Fatal(err)
+	}
+	if okResp["ok"] != true || okResp["reply"] != "OK" || okResp["model"] != "model-a" {
+		t.Fatalf("test success wrong: %s", body)
+	}
+	if _, has := okResp["latency_ms"]; !has {
+		t.Fatalf("test should report latency_ms: %s", body)
+	}
+	if strings.Contains(body, "test-key-123") {
+		t.Fatal("test response must never echo the API key")
+	}
+	// Failure: wrong key -> ok false with a clear error.
+	code, body = post(`{"provider":"mock","api_key":"wrong-key","model":"model-a"}`)
+	if code != 200 {
+		t.Fatalf("test failure = %d %s", code, body)
+	}
+	var badResp map[string]any
+	if err := json.Unmarshal([]byte(body), &badResp); err != nil {
+		t.Fatal(err)
+	}
+	if badResp["ok"] != false || badResp["error"] == nil || badResp["error"] == "" {
+		t.Fatalf("test failure wrong: %s", body)
+	}
+	if strings.Contains(body, "wrong-key") {
+		t.Fatal("test error must never echo the API key")
+	}
+	// No model: clear error.
+	_, body = post(`{"provider":"mock","model":""}`)
+	if !strings.Contains(body, `"ok":false`) {
+		t.Fatalf("empty model should fail: %s", body)
+	}
+}
+
+func TestModelSelectSaves(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearModelCache()
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "mock",
+		Providers: map[string]Provider{"mock": {Name: "mock", BaseURL: "http://localhost:9", Model: "model-a", APIKey: "test-key-123"}}}
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
+	s := &webServer{client: NewClient("http://localhost:9", "test-key-123", "model-a"), runner: runner, cfg: cfg,
+		messages: []Message{{Role: "system", Content: "s"}}, system: "s"}
+	mux := buildMux(s)
+
+	// Pick a model from the dropdown and save, as the Settings UI does.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/settings", strings.NewReader(`{"active_provider":"mock","model":"model-b"}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("settings POST = %d %s", rr.Code, rr.Body.String())
+	}
+	fc := loadFileConfig()
+	if fc.Providers["mock"].Model != "model-b" {
+		t.Fatalf("choosing a model should save it, got %q", fc.Providers["mock"].Model)
+	}
+	// /api/status shows the new model right away.
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/status", nil))
+	if !strings.Contains(rr.Body.String(), `"model":"model-b"`) {
+		t.Fatalf("status should show the new model, got %s", rr.Body.String())
+	}
+}
