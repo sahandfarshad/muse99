@@ -21,6 +21,12 @@ type Config struct {
 	BaseURL    string
 	APIKey     string
 	Model      string
+	Provider   string
+	Providers  map[string]Provider
+	Domain     string
+	TLSEnabled bool
+	CertFile   string
+	KeyFile    string
 	UserName   string
 	MemoryPath string
 	Workdir    string
@@ -32,6 +38,27 @@ type Config struct {
 	Menu       bool
 	Task       string
 	Schedule   bool
+}
+
+// switchProvider activates a provider by name, updating BaseURL/Model/APIKey
+// from its stored settings. It returns false if the name is unknown.
+func (cfg *Config) switchProvider(name string) bool {
+	if cfg.Providers == nil {
+		return false
+	}
+	p, ok := cfg.Providers[name]
+	if !ok {
+		return false
+	}
+	if p.BaseURL != "" {
+		cfg.BaseURL = p.BaseURL
+	}
+	if p.Model != "" {
+		cfg.Model = p.Model
+	}
+	cfg.APIKey = p.APIKey
+	cfg.Provider = name
+	return true
 }
 
 func loadConfig() Config {
@@ -54,20 +81,24 @@ func loadConfig() Config {
 	// Config file + .env fill gaps left by env/flags.
 	loadDotEnv(cfg.Workdir)
 	fc := loadFileConfig()
-	if cfg.APIKey == "" && fc.APIKey != "" {
-		cfg.APIKey = fc.APIKey
+	// Env/flags are the default provider (usually Spark). Fold them into
+	// the providers map so switching away and back keeps the right key.
+	envProvider := matchProvider(cfg.BaseURL, cfg.Model)
+	if cfg.APIKey != "" || cfg.BaseURL != "" || cfg.Model != "" {
+		fc.setProvider(Provider{Name: envProvider, BaseURL: cfg.BaseURL, Model: cfg.Model, APIKey: cfg.APIKey})
+		// Only treat the env values as the active provider when the user
+		// actually set them (or no file config existed yet).
+		if os.Getenv("MODEL_API_KEY") != "" || os.Getenv("MODEL_API_BASE_URL") != "" || os.Getenv("MODEL_ID") != "" {
+			fc.ActiveProvider = envProvider
+		}
 	}
-	if cfg.Model == "muse-spark-1.3" && fc.Model != "" {
-		cfg.Model = fc.Model
-	}
-	if fc.BaseURL != "" && os.Getenv("MODEL_API_BASE_URL") == "" {
-		cfg.BaseURL = fc.BaseURL
-	}
-	if fc.UserName != "" {
-		cfg.UserName = fc.UserName
-	}
-	if fc.Port != 0 {
-		cfg.WebPort = fc.Port
+	applyFileConfig(&cfg, fc)
+	// A provider switch must also refresh the stored key if the file had
+	// a key for the active provider and no env key overrode it.
+	if cfg.APIKey == "" {
+		if p, ok := fc.Providers[fc.ActiveProvider]; ok {
+			cfg.APIKey = p.APIKey
+		}
 	}
 
 	if cfg.MemoryPath == "" {
@@ -128,7 +159,7 @@ func main() {
 	if isSpark(cfg.BaseURL, cfg.Model) {
 		mode = "Muse Spark — Muse mode"
 	}
-	fmt.Printf("Muse99 · %s · model %s\n", mode, cfg.Model)
+	fmt.Printf("Muse99 · %s · provider %s · model %s\n", mode, cfg.Provider, cfg.Model)
 	fmt.Printf("Workdir: %s · Memory: %s\n", cfg.Workdir, cfg.MemoryPath)
 	if !cfg.AllowShell {
 		fmt.Println("Shell tool is off — run with --allow-shell to let me run commands.")
@@ -151,13 +182,13 @@ func main() {
 
 	// SSH menu is the default interactive mode: web address on top.
 	if cfg.Menu {
-		webRunning := false
-		startWebFn := func() error { return startWeb(cfg, client, runner, tools, system) }
+		ctrl := newWebController(cfg, client, runner, tools, system)
 		if cfg.Web {
-			go func() { _ = startWebFn() }()
-			webRunning = true
+			if err := ctrl.Start(cfg); err != nil {
+				fmt.Println("Web server failed to start:", err)
+			}
 		}
-		showMenu(&cfg, client, runner, tools, system, &webRunning, startWebFn)
+		showMenu(&cfg, client, runner, tools, system, ctrl)
 		return
 	}
 
