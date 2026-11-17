@@ -36,8 +36,13 @@ Use the spawn_subtask tool to split off independent pieces (e.g. "write tests fo
 		goal, workdir)
 }
 
-func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, goal, workdir string) string {
-	task := addTask(goal)
+func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, goal, workdir, taskID string) string {
+	// taskID is "" in CLI mode (create one here); the web UI creates
+	// the task first so it can return the id to the browser.
+	task := Task{ID: taskID}
+	if taskID == "" {
+		task = addTask(goal)
+	}
 	updateTask(task.ID, "running", "", []string{"plan", "build", "verify"})
 	fmt.Printf("Task %s started: %s\n", task.ID, goal)
 
@@ -89,7 +94,11 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 				updateTask(task.ID, "failed", msg.Content, steps)
 				return finish(msg.Content)
 			}
-			// Model answered without tools and without DONE — nudge it to continue.
+			// Model answered without tools and without DONE — nudge it
+			// to continue. Save the progress so the Tasks tab (and
+			// the background-task bar) shows the run is alive, not
+			// stuck: steps only used to be written at the very end.
+			updateTask(task.ID, "running", "working: "+truncate(msg.Content, 120), steps)
 			messages = append(messages, Message{Role: "user", Content: "Continue working. Use tools, verify the result, and reply DONE: when it is fully finished."})
 			continue
 		}
@@ -97,6 +106,7 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 		for _, tc := range msg.ToolCalls {
 			steps = append(steps, tc.Function.Name)
 			fmt.Printf("  [%d] [tool] %s %s\n", step+1, tc.Function.Name, truncate(tc.Function.Arguments, 200))
+			updateTask(task.ID, "running", fmt.Sprintf("step %d: %s", len(steps), tc.Function.Name), steps)
 			result := runner.run(tc.Function.Name, tc.Function.Arguments)
 			messages = append(messages, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
 		}

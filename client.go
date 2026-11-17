@@ -21,14 +21,89 @@ type ToolCall struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
+	// ExtraContent carries provider-specific extras that the OpenAI
+	// schema has no room for. Gemini 3/4 return their reasoning
+	// signature here — extra_content.google.thought_signature — and
+	// reject the next turn with 400 ("Function call is missing a
+	// thought_signature") if it is not sent back verbatim. Standard
+	// OpenAI clients strip unknown fields, which is exactly how the
+	// signature gets lost; keeping it on the struct keeps it in the
+	// replayed history, the saved session and the chat DB.
+	ExtraContent *ToolCallExtra `json:"extra_content,omitempty"`
+	// ThoughtSignature is the flat variant some gateways use instead
+	// of extra_content. Preserved the same way.
+	ThoughtSignature string `json:"thought_signature,omitempty"`
+}
+
+// ToolCallExtra is the provider-specific payload on a tool call.
+type ToolCallExtra struct {
+	Google struct {
+		ThoughtSignature string `json:"thought_signature,omitempty"`
+	} `json:"google,omitempty"`
+}
+
+// thoughtSignature returns the reasoning signature carried by this
+// tool call, from either wire location, or "" when there is none.
+func (tc *ToolCall) thoughtSignature() string {
+	if tc.ExtraContent != nil && tc.ExtraContent.Google.ThoughtSignature != "" {
+		return tc.ExtraContent.Google.ThoughtSignature
+	}
+	return tc.ThoughtSignature
+}
+
+// setThoughtSignature stores sig in the documented
+// extra_content.google.thought_signature location.
+func (tc *ToolCall) setThoughtSignature(sig string) {
+	if tc.ExtraContent == nil {
+		tc.ExtraContent = &ToolCallExtra{}
+	}
+	tc.ExtraContent.Google.ThoughtSignature = sig
+}
+
+// skipThoughtSignatureValidator is Google's documented last-resort
+// value for a functionCall part the API did not generate (for
+// example history from a model that does not produce signatures, or
+// a session saved before signatures were preserved). Google says to
+// use it only as a last resort — it degrades model performance —
+// so it is only filled in where a signature is genuinely missing,
+// never over a real one.
+const skipThoughtSignatureValidator = "skip_thought_signature_validator"
+
+// needsThoughtSignature reports whether the current model strictly
+// validates thought signatures on tool calls. Gemini 3 and 4 do;
+// Gemini 2.5 and earlier do not return signatures and do not
+// validate them, so nothing is injected for those.
+func (c *Client) needsThoughtSignature() bool {
+	if !isGeminiBase(c.BaseURL, c.Provider) {
+		return false
+	}
+	m := strings.ToLower(c.Model)
+	return strings.Contains(m, "gemini-3") || strings.Contains(m, "gemini-4")
+}
+
+// ensureThoughtSignatures makes sure every assistant message in the
+// outgoing history carries a signature on its FIRST tool call when
+// the model requires one. Only the first call of a turn carries a
+// signature — parallel siblings arrive unsigned and must stay
+// unsigned — so later calls in the same message are left alone.
+// Messages that already carry a real signature are untouched.
+func ensureThoughtSignatures(msgs []Message) {
+	for i := range msgs {
+		if msgs[i].Role != "assistant" || len(msgs[i].ToolCalls) == 0 {
+			continue
+		}
+		if msgs[i].ToolCalls[0].thoughtSignature() == "" {
+			msgs[i].ToolCalls[0].setThoughtSignature(skipThoughtSignatureValidator)
+		}
+	}
 }
 
 type Message struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string    `json:"tool_call_id,omitempty"`
-	Name      string     `json:"name,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
 }
 
 type ToolDef struct {
@@ -41,11 +116,11 @@ type ToolDef struct {
 }
 
 type chatRequest struct {
-	Model          string    `json:"model"`
-	Messages       []Message `json:"messages"`
-	Tools          []ToolDef `json:"tools,omitempty"`
-	Temperature    float64   `json:"temperature,omitempty"`
-	MaxTokens      int       `json:"max_completion_tokens,omitempty"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Tools       []ToolDef `json:"tools,omitempty"`
+	Temperature float64   `json:"temperature,omitempty"`
+	MaxTokens   int       `json:"max_completion_tokens,omitempty"`
 }
 
 type chatResponse struct {
@@ -105,6 +180,16 @@ func NewClientForProvider(baseURL, apiKey, model, provider string) *Client {
 }
 
 func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
+	// Gemini 3/4 thought signatures: a tool call the model made must
+	// come back with its signature, or the next turn 400s. Fill the
+	// documented bypass only where a signature is genuinely missing
+	// (history from another model, or a session saved before
+	// signatures were preserved). This mutates the caller's messages
+	// in place on purpose — the stored history then replays with the
+	// signature/sentinel too, instead of 400ing on every retry.
+	if c.needsThoughtSignature() {
+		ensureThoughtSignatures(messages)
+	}
 	reqBody := chatRequest{
 		Model:       c.Model,
 		Messages:    messages,

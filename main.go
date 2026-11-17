@@ -231,7 +231,7 @@ func main() {
 		return
 	}
 	if cfg.Task != "" {
-		fmt.Println(runAutonomous(client, runner, tools, system, cfg.Task, cfg.Workdir))
+		fmt.Println(runAutonomous(client, runner, tools, system, cfg.Task, cfg.Workdir, ""))
 		return
 	}
 	messages := []Message{{Role: "system", Content: system}}
