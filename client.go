@@ -65,25 +65,42 @@ type chatResponse struct {
 }
 
 type Client struct {
-	BaseURL string
-	APIKey  string
-	Model   string
-	HTTP    *http.Client
+	BaseURL  string
+	APIKey   string
+	Model    string
+	Provider string // v6: the provider name, so auth quirks (Gemini's
+	// x-goog-api-key retry) work even when the base URL is a test
+	// server or a custom endpoint that does not reveal the provider.
+	HTTP *http.Client
 }
 
 func NewClient(baseURL, apiKey, model string) *Client {
+	return NewClientForProvider(baseURL, apiKey, model, "")
+}
+
+// NewClientForProvider is NewClient with an explicit provider name.
+// An empty provider is guessed from the base URL / model.
+func NewClientForProvider(baseURL, apiKey, model, provider string) *Client {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		baseURL = "https://api.meta.ai/v1"
 	}
+	// v6: a model id saved with a "models/" prefix (Gemini's native
+	// list format) would fail every chat with "model not found" —
+	// always send the bare id.
+	model = normalizeModelID(model)
 	if model == "" {
 		model = "muse-spark-1.3"
 	}
+	if provider == "" {
+		provider = matchProvider(baseURL, model)
+	}
 	return &Client{
-		BaseURL: baseURL,
-		APIKey:  apiKey,
-		Model:   model,
-		HTTP:    &http.Client{Timeout: 120 * time.Second},
+		BaseURL:  baseURL,
+		APIKey:   apiKey,
+		Model:    model,
+		Provider: provider,
+		HTTP:     &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -106,31 +123,52 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	}
 
 	url := c.BaseURL + "/chat/completions"
-	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	// doChat sends the request once. useGoogKey sends the key as
+	// x-goog-api-key instead of Bearer (see below).
+	doChat := func(useGoogKey bool) ([]byte, int, error) {
+		req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+		if err != nil {
+			return nil, 0, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if c.APIKey != "" {
+			if useGoogKey {
+				req.Header.Set("x-goog-api-key", c.APIKey)
+			} else {
+				req.Header.Set("Authorization", "Bearer "+c.APIKey)
+			}
+		}
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, 0, fmt.Errorf("api request failed: %w", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return body, resp.StatusCode, nil
+	}
+
+	body, statusCode, err := doChat(false)
 	if err != nil {
 		return Message{}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	// v6 Gemini auth: some Gemini keys are rejected as Bearer (401/403)
+	// on the OpenAI-compatible endpoint but accepted with the native
+	// x-goog-api-key header — retry once that way before giving up.
+	if (statusCode == 401 || statusCode == 403) && c.APIKey != "" &&
+		(c.Provider == "gemini" || strings.Contains(strings.ToLower(c.BaseURL), "generativelanguage.googleapis.com")) {
+		if retryBody, retryStatus, rerr := doChat(true); rerr == nil && retryStatus < 400 {
+			body, statusCode = retryBody, retryStatus
+		}
 	}
-
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return Message{}, fmt.Errorf("api request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-
 	var out chatResponse
 	if err := json.Unmarshal(body, &out); err != nil {
-		return Message{}, fmt.Errorf("bad api response (%d): %s", resp.StatusCode, string(body)[:min(500, len(body))])
+		return Message{}, fmt.Errorf("bad api response (%d): %s", statusCode, string(body)[:min(500, len(body))])
 	}
 	if out.Error != nil {
 		return Message{}, fmt.Errorf("api error: %s", out.Error.Message)
 	}
-	if resp.StatusCode >= 400 {
-		return Message{}, fmt.Errorf("api error %d: %s", resp.StatusCode, string(body)[:min(500, len(body))])
+	if statusCode >= 400 {
+		return Message{}, fmt.Errorf("api error %d: %s", statusCode, string(body)[:min(500, len(body))])
 	}
 	if len(out.Choices) == 0 {
 		return Message{}, fmt.Errorf("api returned no choices")
