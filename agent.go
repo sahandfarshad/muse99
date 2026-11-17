@@ -41,6 +41,26 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 	updateTask(task.ID, "running", "", []string{"plan", "build", "verify"})
 	fmt.Printf("Task %s started: %s\n", task.ID, goal)
 
+	// Token usage for this task only: snapshot the totals at the start
+	// and report the difference at the end.
+	startUsage := loadUsage()
+	setUsageLabel("task " + task.ID)
+	defer setUsageLabel("")
+	finish := func(result string) string {
+		u := loadUsage()
+		delta := UsageTotals{
+			PromptTokens:     u.PromptTokens - startUsage.PromptTokens,
+			CompletionTokens: u.CompletionTokens - startUsage.CompletionTokens,
+			TotalTokens:      u.TotalTokens - startUsage.TotalTokens,
+			Calls:            u.Calls - startUsage.Calls,
+			EstimatedCostUSD: estimatedCost(u.PromptTokens-startUsage.PromptTokens, u.CompletionTokens-startUsage.CompletionTokens),
+		}
+		line := fmt.Sprintf("Tokens: %s in / %s out, est. $%.4f", formatInt(delta.PromptTokens), formatInt(delta.CompletionTokens), delta.EstimatedCostUSD)
+		// No Println here: main prints the returned string in CLI mode,
+		// and printing here too would show the line twice.
+		return result + "\n" + line
+	}
+
 	messages := []Message{
 		{Role: "system", Content: system + "\n\n" + autonomousPrompt(goal, workdir)},
 		{Role: "user", Content: "Start. Work until DONE."},
@@ -52,7 +72,7 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 		msg, err := client.Chat(messages, tools)
 		if err != nil {
 			updateTask(task.ID, "failed", "API error: "+err.Error(), steps)
-			return "Task failed — API error: " + err.Error()
+			return finish("Task failed — API error: " + err.Error())
 		}
 		messages = append(messages, msg)
 		_ = saveSession(task.ID, messages)
@@ -63,11 +83,11 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 			if strings.Contains(msg.Content, "DONE:") {
 				updateTask(task.ID, "done", msg.Content, steps)
 				writeTaskSummary(workdir, task.ID, goal, msg.Content)
-				return msg.Content
+				return finish(msg.Content)
 			}
 			if strings.Contains(msg.Content, "BLOCKED:") {
 				updateTask(task.ID, "failed", msg.Content, steps)
-				return msg.Content
+				return finish(msg.Content)
 			}
 			// Model answered without tools and without DONE — nudge it to continue.
 			messages = append(messages, Message{Role: "user", Content: "Continue working. Use tools, verify the result, and reply DONE: when it is fully finished."})
@@ -85,7 +105,7 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 	}
 
 	updateTask(task.ID, "failed", "Hit step limit (100) without DONE. Last: "+lastReply, steps)
-	return "Task stopped at the 100-step limit without DONE. Last reply: " + lastReply + "\nCheck TASK.md and run again with a smaller task, or resume from the saved session " + task.ID
+	return finish("Task stopped at the 100-step limit without DONE. Last reply: " + lastReply + "\nCheck TASK.md and run again with a smaller task, or resume from the saved session " + task.ID)
 }
 
 func writeTaskSummary(workdir, id, goal, summary string) {
