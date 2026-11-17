@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,7 +38,8 @@ func toolDefinitions() []ToolDef {
 		def("run_shell", "Run a shell command, return stdout/stderr. Use for build, test, git, docker.", map[string]any{"command": str()}, []string{"command"}),
 		def("remote_shell", "Run a command on a remote server you have access to, via ssh. server is a name from servers.json, or user@host. Only use servers the user explicitly gave you access to.", map[string]any{"server": str(), "command": str()}, []string{"server", "command"}),
 		def("git_run", "Run a safe git command in the workdir, e.g. status, log --oneline -10, diff --stat, add, commit -m.", map[string]any{"command": str()}, []string{"command"}),
-		def("fetch_url", "Fetch a URL as text (truncated).", map[string]any{"url": str()}, []string{"url"}),
+		def("fetch_url", "Fetch a URL as clean text (title + main text). Lightweight HTTP fetch by default.", map[string]any{"url": str()}, []string{"url"}),
+		def("browse_url", "Browse a URL and return its title and clean text. Set js=true only when the page needs JavaScript — that uses headless Chromium (~300-500 MB RAM) if installed, and returns a clear install message if it is not.", map[string]any{"url": str(), "js": boolean()}, []string{"url"}),
 		def("web_search", "Search the web (DuckDuckGo lite). Returns titles and links.", map[string]any{"query": str()}, []string{"query"}),
 		def("scaffold_app", "Create a starter app in a folder: kind is one of go-cli, web-html, python-cli, node-express. Creates real files, README and a run script.", map[string]any{"kind": str(), "name": str(), "path": str()}, []string{"kind", "name"}),
 		def("spawn_subtask", "Split off an independent sub-task to a sub-agent. It runs its own tool loop (max 10 steps) and returns a summary. Use for parallel pieces of a big task.", map[string]any{"task": str()}, []string{"task"}),
@@ -51,10 +53,25 @@ type toolRunner struct {
 	workdir    string
 	memoryPath string
 	allowShell bool
+	shellMu    sync.Mutex
 	// delegate is set by main for spawn_subtask — a sub-agent turn.
 	delegate func(task string) string
-	client    *Client
-	tools     []ToolDef
+	client   *Client
+	tools    []ToolDef
+}
+
+// SetAllowShell changes the shell setting live (web checkbox / menu
+// toggle). No restart needed — the next tool call sees the new value.
+func (r *toolRunner) SetAllowShell(v bool) {
+	r.shellMu.Lock()
+	defer r.shellMu.Unlock()
+	r.allowShell = v
+}
+
+func (r *toolRunner) shellAllowed() bool {
+	r.shellMu.Lock()
+	defer r.shellMu.Unlock()
+	return r.allowShell
 }
 
 func (r *toolRunner) run(name, argsJSON string) string {
@@ -154,14 +171,14 @@ func (r *toolRunner) run(name, argsJSON string) string {
 		return strings.Join(out, "\n")
 
 	case "run_shell":
-		if !r.allowShell {
-			return "error: shell is disabled. Run with --allow-shell to enable run_shell."
+		if !r.shellAllowed() {
+			return "error: shell is disabled. Turn on 'Allow shell commands' in the web UI (Settings) or the SSH menu, or run with --allow-shell."
 		}
 		return r.shell(get("command"), r.workdir)
 
 	case "remote_shell":
-		if !r.allowShell {
-			return "error: shell is disabled. Run with --allow-shell."
+		if !r.shellAllowed() {
+			return "error: shell is disabled. Turn on 'Allow shell commands' in the web UI (Settings) or the SSH menu."
 		}
 		server := get("server")
 		// Resolve a named server from servers.json
@@ -181,7 +198,7 @@ func (r *toolRunner) run(name, argsJSON string) string {
 		return r.shell(cmd, r.workdir)
 
 	case "git_run":
-		if !r.allowShell {
+		if !r.shellAllowed() {
 			return "error: shell is disabled."
 		}
 		// Block destructive / credential operations.
@@ -194,14 +211,14 @@ func (r *toolRunner) run(name, argsJSON string) string {
 		return r.shell("git "+get("command"), r.workdir)
 
 	case "fetch_url":
-		client := &http.Client{Timeout: 20 * time.Second}
-		resp, err := client.Get(get("url"))
-		if err != nil {
-			return "error: " + err.Error()
+		return browsePage(get("url"), false)
+
+	case "browse_url":
+		useJS := false
+		if v, ok := args["js"].(bool); ok {
+			useJS = v
 		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 20000))
-		return fmt.Sprintf("HTTP %d\n%s", resp.StatusCode, string(body))
+		return browsePage(get("url"), useJS)
 
 	case "web_search":
 		u := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(get("query"))
