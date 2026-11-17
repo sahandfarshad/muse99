@@ -896,3 +896,150 @@ func TestModelSelectSaves(t *testing.T) {
 		t.Fatalf("status should show the new model, got %s", rr.Body.String())
 	}
 }
+
+// ---------- v5: default port 3759, uninstall, no-key notice ----------
+
+func TestDefaultWebPort(t *testing.T) {
+	if DefaultWebPort != 3759 {
+		t.Fatalf("DefaultWebPort = %d, want 3759", DefaultWebPort)
+	}
+	// A saved port is preserved; no saved port keeps the default.
+	cfg := Config{WebPort: DefaultWebPort}
+	applyFileConfig(&cfg, FileConfig{Port: 8081})
+	if cfg.WebPort != 8081 {
+		t.Fatalf("saved port 8081 was overridden: got %d", cfg.WebPort)
+	}
+	cfg = Config{WebPort: DefaultWebPort}
+	applyFileConfig(&cfg, FileConfig{})
+	if cfg.WebPort != DefaultWebPort {
+		t.Fatalf("no saved port should keep the default: got %d", cfg.WebPort)
+	}
+	// The default address shows 3759.
+	if got := webAddressFor(Config{WebPort: DefaultWebPort}); !strings.Contains(got, ":3759") {
+		t.Fatalf("default address should contain :3759: %q", got)
+	}
+}
+
+func TestUninstallKeepsDataByDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := t.TempDir()
+	dataDir := filepath.Join(home, ".muse99")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(binDir, "muse99")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svcDir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(svcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svcPath := filepath.Join(svcDir, "muse99.service")
+	if err := os.WriteFile(svcPath, []byte("[Unit]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tgt := uninstallTarget{ExePath: binPath, InstallDir: binDir, DataDir: dataDir, HomeDir: home}
+	removed, kept, err := runUninstall(tgt, false)
+	if err != nil {
+		t.Fatalf("uninstall (keep data) failed: %v", err)
+	}
+	if _, err := os.Stat(binPath); !os.IsNotExist(err) {
+		t.Fatal("binary should be removed")
+	}
+	if _, err := os.Stat(svcPath); !os.IsNotExist(err) {
+		t.Fatal("service file should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "config.json")); err != nil {
+		t.Fatal("data should be KEPT by default, but config.json is gone")
+	}
+	joined := strings.Join(append(removed, kept...), "\n")
+	if !strings.Contains(joined, "data kept") {
+		t.Fatalf("result should say data was kept: %s", joined)
+	}
+}
+
+func TestUninstallRemovesDataWithOptIn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := t.TempDir()
+	dataDir := filepath.Join(home, ".muse99")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(binDir, "muse99")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tgt := uninstallTarget{ExePath: binPath, InstallDir: binDir, DataDir: dataDir, HomeDir: home}
+	if _, _, err := runUninstall(tgt, true); err != nil {
+		t.Fatalf("uninstall (remove data) failed: %v", err)
+	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Fatal("data dir should be removed with the opt-in")
+	}
+	// The install dir was emptied by the uninstall, so it goes too.
+	if _, err := os.Stat(binDir); !os.IsNotExist(err) {
+		t.Fatal("empty install dir should be removed")
+	}
+}
+
+func TestNoAPIKeyChatNotice(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), APIKey: ""}
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
+	// The client points nowhere — the notice must come back without
+	// any API call being attempted.
+	s := &webServer{client: NewClient("http://127.0.0.1:9", "", "m"), runner: runner, cfg: cfg,
+		messages: []Message{{Role: "system", Content: "s"}}, system: "s"}
+	mux := buildMux(s)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"message":"hello"}`))
+	mux.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("chat with no key = %d, body %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "No API key set yet") || !strings.Contains(body, "Settings") {
+		t.Fatalf("chat should return the friendly Settings notice, got %s", body)
+	}
+	if strings.Contains(body, "401") || strings.Contains(body, "unauthorized") {
+		t.Fatalf("chat should not leak a raw API error, got %s", body)
+	}
+	// And /api/status must say the key is not set, so the UI banner shows.
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/status", nil))
+	if !strings.Contains(rr.Body.String(), `"api_key_set":false`) {
+		t.Fatalf("status should report api_key_set false, got %s", rr.Body.String())
+	}
+}
+
+func TestInstallScriptHasNoExportBlock(t *testing.T) {
+	data, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if strings.Contains(s, "export MODEL_API_KEY") {
+		t.Fatal("install.sh must not print export MODEL_API_KEY setup lines any more")
+	}
+	if strings.Contains(s, "--allow-shell") {
+		t.Fatal("install.sh must not tell the user to run --allow-shell any more")
+	}
+	if !strings.Contains(s, "3759") {
+		t.Fatal("install.sh should mention the default port 3759")
+	}
+	if !strings.Contains(s, "/dev/tty") {
+		t.Fatal("install.sh should reopen the terminal (/dev/tty) for the menu after a curl|bash run")
+	}
+	if !strings.Contains(s, "Settings") || !strings.Contains(s, "Provider") {
+		t.Fatal("install.sh should point at Settings → Provider & model for the API key")
+	}
+}
