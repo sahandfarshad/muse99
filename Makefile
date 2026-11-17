@@ -13,7 +13,7 @@ run:
 	./$(APP) --allow-shell
 
 web:
-	./$(APP) --web --port 8080 --allow-shell
+	./$(APP) --web --port 3759 --allow-shell
 
 task:
 	./$(APP) --task "$(TASK)" --allow-shell
