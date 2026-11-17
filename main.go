@@ -92,17 +92,13 @@ func loadConfig() Config {
 	// Config file + .env fill gaps left by env/flags.
 	loadDotEnv(cfg.Workdir)
 	fc := loadFileConfig()
-	// Env/flags are the default provider (usually Spark). Fold them into
-	// the providers map so switching away and back keeps the right key.
-	envProvider := matchProvider(cfg.BaseURL, cfg.Model)
-	if cfg.APIKey != "" || cfg.BaseURL != "" || cfg.Model != "" {
-		fc.setProvider(Provider{Name: envProvider, BaseURL: cfg.BaseURL, Model: cfg.Model, APIKey: cfg.APIKey})
-		// Only treat the env values as the active provider when the user
-		// actually set them (or no file config existed yet).
-		if os.Getenv("MODEL_API_KEY") != "" || os.Getenv("MODEL_API_BASE_URL") != "" || os.Getenv("MODEL_ID") != "" {
-			fc.ActiveProvider = envProvider
-		}
-	}
+	// v6 root-cause fix: only fold env/flag values into the providers
+	// map when the user ACTUALLY provided them — see foldEnvIntoConfig.
+	explicit := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	envSet := os.Getenv("MODEL_API_KEY") != "" || os.Getenv("MODEL_API_BASE_URL") != "" ||
+		os.Getenv("MODEL_ID") != "" || os.Getenv("OPENAI_API_KEY") != ""
+	foldEnvIntoConfig(&cfg, &fc, explicit, envSet)
 	applyFileConfig(&cfg, fc)
 	// --allow-shell on the command line wins over the saved setting;
 	// otherwise the saved checkbox value (from the web UI / menu) applies.
@@ -126,6 +122,24 @@ func loadConfig() Config {
 		cfg.Prompt = strings.Join(flag.Args(), " ")
 	}
 	return cfg
+}
+
+// foldEnvIntoConfig folds explicitly-provided env/flag values into the
+// providers map. The flag defaults (Spark base URL / muse-spark-1.3)
+// are always non-empty, so the old code folded them on every startup
+// — and setProvider sets ActiveProvider unconditionally, silently
+// switching the active provider back to Spark and dropping a saved
+// Gemini (or other) provider after every restart. That is why Gemini
+// "could not connect": the live client was Spark with no key, even
+// though config.json still said gemini. Now the saved provider
+// survives restarts; env/flags only win when explicitly given.
+func foldEnvIntoConfig(cfg *Config, fc *FileConfig, explicit map[string]bool, envSet bool) {
+	if !envSet && !explicit["api-key"] && !explicit["base-url"] && !explicit["model"] {
+		return
+	}
+	envProvider := matchProvider(cfg.BaseURL, cfg.Model)
+	fc.setProvider(Provider{Name: envProvider, BaseURL: cfg.BaseURL, Model: cfg.Model, APIKey: cfg.APIKey})
+	fc.ActiveProvider = envProvider
 }
 
 func envOr(k, def string) string {
