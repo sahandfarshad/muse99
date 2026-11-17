@@ -60,7 +60,7 @@ Just run `muse99` over SSH:
   15 Quit
 ```
 
-Everything the server needs is in the menu: start / stop / restart the web UI, change its port, set a domain, set up SSL with Let's Encrypt (it checks for certbot and for existing certificates first), update Muse99 itself to the latest release, and switch API providers. The web link on top shows `https://your-domain` once a domain and SSL are set, otherwise `http://<server-ip>:<port>`. Option 14 toggles shell commands (same setting as the web UI checkbox), and the menu header shows whether shell is ON or OFF.
+Everything the server needs is in the menu: start / stop / restart the web UI, change its port, set a domain, set up SSL with Let's Encrypt (it checks for certbot and for existing certificates first), update Muse99 itself to the latest release, and switch API providers. The web link on top shows `https://your-domain` once a domain and SSL are set, otherwise `http://<server-ip>:<port>`. Option 14 toggles shell commands (same setting as the web UI checkbox), and the menu header shows whether shell is ON or OFF. Inside Providers (option 9), **l** lists the current provider's models and lets you pick one by number, and **t** tests a model to see if it answers.
 
 ## Chats — side chats that survive a restart
 
@@ -101,14 +101,29 @@ Muse99 is built for a small server — a 1 GB RAM Ubuntu 22.04 box is fine:
 
 Why bbolt and not SQLite: the current SQLite driver (modernc.org/sqlite v1.62) needs the Go 1.26 toolchain, while this project and its CI pin Go 1.23, and it would add ~10 MB to the binary. bbolt builds on Go 1.23 and adds ~1 MB. If a future SQLite driver supports Go 1.23 again, the database layer is one file (`db.go`) and can be swapped.
 
-## Web UI — clean dashboard
+## Models — pick one, don't type one
+
+You never have to type a model name by hand. In web **Settings → Provider & model**, choose a provider, press **Fetch models**, and pick from the list that the provider itself returns. Type in the filter box to narrow a long list. Press **Test** and Muse99 sends one tiny message ("Reply with the single word OK") to that model and tells you whether it answers and how fast — so you can try models one by one and see which works, before saving. Saving stores that model for the provider, exactly as typing it would.
+
+How it works: Muse99 calls the provider's `GET {base_url}/models` endpoint with your key (15 s timeout). The list is cached for 10 minutes and the last-known list is saved in the database, so the chooser still works offline after a restart — it says whether the list is live, cached, or suggested, and when it was fetched. Your API key is never shown, logged, or returned by any of these endpoints.
+
+Provider quirks:
+
+- **Spark, OpenAI, OpenRouter:** `/v1/models` works with the key.
+- **Gemini:** the OpenAI-compatible endpoint often returns an empty list — then Muse99 shows suggested models (`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`) instead of an empty dropdown.
+- **Ollama:** `/v1/models` works; if it fails, Muse99 falls back to Ollama's native `GET /api/tags` and maps tag names to model ids. No key needed.
+- **Any provider whose list is blocked or empty:** the model box stays a plain text input — just type any model name, it still works.
+
+The same thing is in the SSH menu, Providers (option 9): **l** lists the current provider's models and lets you pick one by number, **t** tests a model. API endpoints, for scripts: `GET /api/models?provider=spark`, `POST /api/models/refresh {provider, base_url, api_key}`, `POST /api/models/test {provider|base_url, api_key, model}` → `{ok, model, latency_ms, reply, error}`.
+
+## Web UI — minimal, slick, modern
 
 ```bash
 muse99 --web --port 8080 --allow-shell
 # open http://your-server-ip:8080
 ```
 
-A clean, light, minimal chat page — white chat card, user messages on the right, Muse99 on the left, a slim top bar with the model/provider and the web address. Tabs: **Chat | Files | Tasks | Memory | Servers | Settings**. The address is also shown at the top of the web page itself. The Chat tab has a sidebar with your chats (New chat, switch, rename, delete, search). Settings has a provider dropdown, API base URL / model / key, web port, domain, SSL on/off, and the **Allow shell commands** checkbox (port and SSL need a web UI restart from the menu).
+One page, no external CSS or JavaScript, no build step — it works offline on a 1 GB server. Restrained light palette with one indigo accent, rounded cards, soft shadows, pill badges for provider/model, a slim collapsible chat sidebar, and a focused chat area with the composer pinned at the bottom. Tabs: **Chat | Files | Tasks | Memory | Servers | Settings**. The address is also shown at the top of the web page itself. The Chat tab has a sidebar with your chats (New chat, switch, rename, delete, search). Settings has the provider & model picker (above), web port, domain, SSL on/off, and the **Allow shell commands** checkbox (port and SSL need a web UI restart from the menu).
 
 ## Give it a task — it works till the end
 
@@ -226,8 +241,9 @@ git push origin v0.1.0
 | `main.go` | CLI, config, `--task`, `--schedule`, `--web`, `--menu` |
 | `agent.go` | Autonomous loop: plan → act → verify → DONE, 100 steps, sessions |
 | `menu.go` | SSH menu — web address on top, start/stop/restart, port, domain, SSL, update, providers, chats, shell toggle |
-| `web.go` | Clean web dashboard — chat sidebar, files, tasks, memory, servers, settings; real start/stop/restart + TLS |
-| `db.go` | Embedded database (bbolt) — persistent chats, memories, usage; scoring, dedupe, auto-summary |
+| `web.go` | Modern minimal web dashboard — chat sidebar, files, tasks, memory, servers, settings; model picker; real start/stop/restart + TLS |
+| `models.go` | Model discovery + testing — `GET /models` fetch, 10-min cache, persisted last-known list, `/api/models` + `/api/models/test` |
+| `db.go` | Embedded database (bbolt) — persistent chats, memories, usage, model lists; scoring, dedupe, auto-summary |
 | `browse.go` | Browser layers: HTTP fetch + HTML-to-text, optional headless Chromium |
 | `tools.go` | 16 tools incl. edit, search, git, remote SSH, scaffold, sub-agents, browse_url |
 | `client.go` | OpenAI-compatible `/chat/completions` client |
