@@ -366,8 +366,10 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 		fmt.Println()
 		fmt.Println("  s  Switch provider (type its number or name)")
 		fmt.Println("  a  Add / update a provider key")
+		fmt.Println("  l  List models for the current provider")
+		fmt.Println("  t  Test a model (does it answer?)")
 		fmt.Println("  b  Back to main menu")
-		fmt.Print("  Choose [s/a/b]: ")
+		fmt.Print("  Choose [s/a/l/t/b]: ")
 		if !scanner.Scan() {
 			return
 		}
@@ -376,6 +378,46 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 		switch choice {
 		case "b", "back", "":
 			return
+		case "l", "list":
+			// Fetch the current provider's models and offer to pick one.
+			list, err := getModels(cfg.BaseURL, cfg.APIKey, cfg.Provider, true)
+			if err != nil {
+				fmt.Println("Could not fetch models:", err)
+				continue
+			}
+			if len(list.Models) == 0 {
+				fmt.Println("Provider returned no models — type a model name by hand (option 'a').")
+				continue
+			}
+			fmt.Printf("Models for %s (%s, fetched %s):\n", cfg.Provider, list.Source, list.FetchedAt.Format("15:04"))
+			for i, m := range list.Models {
+				mark := " "
+				if m.ID == cfg.Model {
+					mark = "*"
+				}
+				fmt.Printf("  %s %2d  %s\n", mark, i+1, m.ID)
+			}
+			pick := prompt(scanner, "Pick a model number (Enter to keep "+cfg.Model+")", "")
+			if n, err := strconv.Atoi(strings.TrimSpace(pick)); err == nil && n >= 1 && n <= len(list.Models) {
+				cfg.Model = list.Models[n-1].ID
+				if cfg.Providers != nil {
+					p := cfg.Providers[cfg.Provider]
+					p.Model = cfg.Model
+					cfg.Providers[cfg.Provider] = p
+				}
+				saveRuntimeConfig(cfg)
+				refreshClient(cfg, client, ctrl, system, messages)
+				fmt.Println("Model is now", cfg.Model)
+			}
+		case "t", "test":
+			model := prompt(scanner, "Model to test", cfg.Model)
+			fmt.Printf("Testing %s …\n", model)
+			reply, latency, err := testModel(cfg.BaseURL, cfg.APIKey, model)
+			if err != nil {
+				fmt.Println("  ✗ failed:", err)
+				continue
+			}
+			fmt.Printf("  ✓ works — replied %q in %d ms\n", reply, latency)
 		case "s", "switch":
 			which := prompt(scanner, "Provider number or name", cfg.Provider)
 			name := which
@@ -436,7 +478,7 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 			fmt.Println("Saved", which, "· model", cfg.Model, "· key:", maskKey(cfg.APIKey))
 			fmt.Println("It is now the active provider.")
 		default:
-			fmt.Println("Type s, a, or b.")
+			fmt.Println("Type s, a, l, t, or b.")
 		}
 		fmt.Println()
 	}
