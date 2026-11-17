@@ -12,15 +12,15 @@ Muse99 is not the Muse app itself — that has hosted Gmail/Calendar, wallet, pr
 curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash
 ```
 
-That downloads the pre-built binary for your server (amd64 or arm64) from the latest GitHub release and puts it in `~/.local/bin/muse99`. No Go, no clone, no build on the server — GitHub Actions already built it when the release was tagged. Then:
+That downloads the pre-built binary for your server (amd64 or arm64) from the latest GitHub release and puts it in `~/.local/bin/muse99`. No Go, no clone, no build on the server — GitHub Actions already built it when the release was tagged.
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-export MODEL_API_KEY="your-key"
-export MODEL_API_BASE_URL="https://api.meta.ai/v1"
-export MODEL_ID="muse-spark-1.3"   # or muse-spark-1.4 when it ships
-muse99 --allow-shell
-```
+Then the installer does the rest by itself: it **starts the web UI** (default port **3759**) and **opens the SSH menu**, with the web UI link on top of the menu. No terminal setup is needed — the API key is set inside the web UI:
+
+1. Open the web UI link from the top of the menu (e.g. `http://192.168.1.10:3759`).
+2. Go to **Settings → Provider & model**, pick your provider, paste your API key.
+3. Press **Fetch models**, choose a model, press **Test** to check it works, then **Save**.
+
+That is the whole setup. Chat works right after that. (If you run the installer with no terminal attached — CI, a piped run — it starts the web UI in the background, prints the address, and exits instead of hanging. Run `muse99` later to open the menu. Advanced users can still pass a key for one run with `MODEL_API_KEY=your-key muse99 --menu=false`, but the web UI is the supported way.)
 
 Specific version, or a different install folder:
 
@@ -37,8 +37,8 @@ Just run `muse99` over SSH:
 
 ```
 ═══════════════════════════════════════════════════════════
-  ✦ Muse99  —  Web UI: http://192.168.1.10:8080
-  Status: web UI is stopped  ·  choose 1 to start it
+  ✦ Muse99  —  Web UI: http://192.168.1.10:3759
+  Status: web UI is RUNNING  ·  open the address above in your browser
   Provider: spark  ·  Model: muse-spark-1.3  ·  Muse Spark — Muse mode
   User: Takahashi  ·  Workdir: /home/ubuntu
 ═══════════════════════════════════════════════════════════
@@ -57,7 +57,8 @@ Just run `muse99` over SSH:
   12 Show web address / status
   13 Chats
   14 Toggle shell commands
-  15 Quit
+  16 Uninstall Muse99
+  17 Quit
 ```
 
 Everything the server needs is in the menu: start / stop / restart the web UI, change its port, set a domain, set up SSL with Let's Encrypt (it checks for certbot and for existing certificates first), update Muse99 itself to the latest release, and switch API providers. The web link on top shows `https://your-domain` once a domain and SSL are set, otherwise `http://<server-ip>:<port>`. Option 14 toggles shell commands (same setting as the web UI checkbox), and the menu header shows whether shell is ON or OFF. Inside Providers (option 9), **l** lists the current provider's models and lets you pick one by number, and **t** tests a model to see if it answers.
@@ -119,8 +120,8 @@ The same thing is in the SSH menu, Providers (option 9): **l** lists the current
 ## Web UI — minimal, slick, modern
 
 ```bash
-muse99 --web --port 8080 --allow-shell
-# open http://your-server-ip:8080
+muse99 --web --port 3759
+# open http://your-server-ip:3759
 ```
 
 One page, no external CSS or JavaScript, no build step — it works offline on a 1 GB server. Restrained light palette with one indigo accent, rounded cards, soft shadows, pill badges for provider/model, a slim collapsible chat sidebar, and a focused chat area with the composer pinned at the bottom. Tabs: **Chat | Files | Tasks | Memory | Servers | Settings**. The address is also shown at the top of the web page itself. The Chat tab has a sidebar with your chats (New chat, switch, rename, delete, search). Settings has the provider & model picker (above), web port, domain, SSL on/off, and the **Allow shell commands** checkbox (port and SSL need a web UI restart from the menu).
@@ -160,12 +161,7 @@ Muse99 keeps a key per provider, so switching back restores the right key. Add a
 
 Spark is Muse mode — the system prompt detects it by base URL / model and uses the Spark reasoning notes. The others use the same Muse99 persona with a different brain. Ollama needs no real key (the placeholder `ollama` is accepted) and runs locally.
 
-```bash
-# Or by hand, for the first provider only:
-export MODEL_API_BASE_URL="https://api.meta.ai/v1"
-export MODEL_ID="muse-spark-1.3"
-export MODEL_API_KEY="your-key"
-```
+(Adding a provider by hand in a terminal is not needed any more: use **Settings → Provider & model** in the web UI, or the SSH menu option 9. Advanced users can still pass `MODEL_API_BASE_URL` / `MODEL_ID` / `MODEL_API_KEY` as env vars for a single run.)
 
 Config order: `~/.muse99/config.json` → `.env` → env vars → flags. The config file is `600` permissions — never commit it. Providers live in that same file, under `providers` / `active_provider`.
 
@@ -187,6 +183,10 @@ Point your domain at the server (an A record to its IP), open ports 80 and 443, 
 
 In the SSH menu, option 8 (Update Muse99) downloads the latest release binary, checks it runs `--help`, then replaces the current binary. Quit and run `muse99` again to use it. Or just run the one-line installer again — it does the same thing.
 
+## Uninstalling
+
+SSH menu option **16 (Uninstall Muse99)**, or `muse99 --uninstall`, or `bash uninstall.sh`. It stops the web UI first, shows exactly what it will remove, and only proceeds after you type **YES**. It removes the binary and any systemd service file, and removes the install folder only if it is empty. Your data in `~/.muse99` (config, chats, memory, usage) is **kept by default** — it is only deleted if you answer yes to the data question, or pass `--yes` (`muse99 --uninstall --yes` is fully non-interactive and removes data too).
+
 ## Tools (16)
 
 `read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `run_shell`, `remote_shell`, `git_run`, `fetch_url`, `browse_url`, `web_search`, `scaffold_app`, `spawn_subtask`, `get_time`, `remember`, `set_goal`
@@ -207,11 +207,11 @@ muse99 --schedule
 
 ```bash
 make build          # vet + test + build
-make web            # web UI on :8080
+make web            # web UI on :3759
 make docker         # docker build
-docker compose up -d   # needs MODEL_API_KEY in .env
+docker compose up -d   # then set the key in the web UI, or put MODEL_API_KEY in .env first
 
-# systemd (edit the API key first)
+# systemd (no API key in the file — set it in the web UI, Settings → Provider & model)
 cp muse99.service ~/.config/systemd/user/muse99.service
 systemctl --user enable --now muse99
 ```
@@ -253,7 +253,8 @@ git push origin v0.1.0
 | `scheduler.go` | Scheduled prompts |
 | `Dockerfile`, `docker-compose.yml`, `Makefile` | Production packaging |
 | `muse99.service` | systemd unit |
-| `install.sh` | One-line Ubuntu installer — downloads the release binary, no Go, no compile |
+| `install.sh` | One-line Ubuntu installer — downloads the release binary, starts the web UI (port 3759), opens the SSH menu |
+| `uninstall.go`, `uninstall.sh` | Uninstall — menu option 16, `muse99 --uninstall`, or `bash uninstall.sh`; data kept unless you say yes |
 | `.github/workflows/` | CI + Release |
 
 ## Safety
