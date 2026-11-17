@@ -92,7 +92,11 @@ func printMenuHeader(cfg Config, ctrl *webController) {
 		mode = "Muse Spark — Muse mode"
 	}
 	fmt.Printf("  Provider: %s  ·  Model: %s  ·  %s\n", cfg.Provider, cfg.Model, mode)
-	fmt.Printf("  %s\n", usageShort())
+	shell := "OFF"
+	if cfg.AllowShell {
+		shell = "ON"
+	}
+	fmt.Printf("  Shell commands: %s  ·  %s\n", shell, usageShort())
 	fmt.Printf("  User: %s  ·  Workdir: %s\n", cfg.UserName, cfg.Workdir)
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
@@ -128,7 +132,7 @@ func saveRuntimeConfig(cfg *Config) {
 // provider / key change, and restarts the web UI if it was running.
 func refreshClient(cfg *Config, client *Client, ctrl *webController, system *string, messages *[]Message) {
 	*client = *NewClient(cfg.BaseURL, cfg.APIKey, cfg.Model)
-	*system = systemPrompt(cfg.UserName, loadMemory(cfg.MemoryPath), cfg.BaseURL, cfg.Model)
+	*system = systemPrompt(cfg.UserName, memoryContextFor("", cfg.MemoryPath), cfg.BaseURL, cfg.Model)
 	*messages = []Message{{Role: "system", Content: *system}}
 	if ctrl != nil && ctrl.IsRunning() {
 		if err := ctrl.Restart(*cfg, *system); err != nil {
@@ -156,9 +160,11 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 		fmt.Println("  10 Show memory")
 		fmt.Println("  11 Show usage")
 		fmt.Println("  12 Show web address / status")
-		fmt.Println("  13 Quit")
+		fmt.Println("  13 Chats")
+		fmt.Println("  14 Toggle shell commands")
+		fmt.Println("  15 Quit")
 		fmt.Println()
-		fmt.Print("  Choose [1-13]: ")
+		fmt.Print("  Choose [1-15]: ")
 		if !scanner.Scan() {
 			return
 		}
@@ -247,7 +253,7 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 				fmt.Println("You can also run the installer again:")
 				fmt.Println("  curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash")
 			} else {
-				fmt.Println("Update done. Quit the menu (option 12) and run muse99 again to use the new version.")
+				fmt.Println("Update done. Quit the menu (option 13) and run muse99 again to use the new version.")
 			}
 			pause(scanner)
 
@@ -256,6 +262,15 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			pause(scanner)
 
 		case "10":
+			if appDB != nil {
+				if mems, err := appDB.ListMemories(); err == nil && len(mems) > 0 {
+					for _, m := range mems {
+						fmt.Printf("- [%s] %s\n", m.Kind, m.Text)
+					}
+					pause(scanner)
+					continue
+				}
+			}
 			mem := loadMemory(cfg.MemoryPath)
 			if strings.TrimSpace(mem) == "" {
 				fmt.Println("(no memory saved yet)")
@@ -294,12 +309,40 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			}
 			pause(scanner)
 
-		case "13", "q", "quit", "exit":
+		case "13":
+			if appDB == nil {
+				fmt.Println("No database — chats are not persistent in this run.")
+				pause(scanner)
+				continue
+			}
+			chats, _ := appDB.ListChats()
+			if len(chats) == 0 {
+				fmt.Println("(no chats yet — start one from Terminal chat or the web UI)")
+			}
+			for i, c := range chats {
+				fmt.Printf("  %d  %s  (%d messages, %s)\n", i+1, c.Title, c.MsgCount, c.UpdatedAt.Format("2006-01-02 15:04"))
+			}
+			fmt.Println("Switch chats in Terminal chat with /open <number>, or in the web UI sidebar.")
+			pause(scanner)
+
+		case "14":
+			runner.SetAllowShell(!runner.shellAllowed())
+			cfg.AllowShell = runner.shellAllowed()
+			saveRuntimeConfig(cfg)
+			if cfg.AllowShell {
+				fmt.Println("Shell commands are now ON — the agent can run commands on this server.")
+				fmt.Println("Only turn this on in a folder you trust.")
+			} else {
+				fmt.Println("Shell commands are now OFF.")
+			}
+			pause(scanner)
+
+		case "15", "q", "quit", "exit":
 			fmt.Println("Bye, " + cfg.UserName + ".")
 			return
 
 		default:
-			fmt.Println("Please choose 1-13.")
+			fmt.Println("Please choose 1-15.")
 			pause(scanner)
 		}
 	}
@@ -542,7 +585,18 @@ func downloadFile(url, dest string) error {
 }
 
 // runREPL is the terminal chat, extracted so the menu can return to it.
+// Chats are persistent (v3): /chats lists them, /new starts one,
+// /open switches, /summarise extracts durable facts into memory.
 func runREPL(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, messages *[]Message, scanner *bufio.Scanner) {
+	chatID := ""
+	if appDB != nil {
+		chatID = loadChatInto("", messages, (*messages)[0].Content)
+		if chatID != "" {
+			if c, err := appDB.GetChat(chatID); err == nil {
+				fmt.Printf("(chat: %s)\n", c.Title)
+			}
+		}
+	}
 	for {
 		fmt.Print("you> ")
 		if !scanner.Scan() {
@@ -556,17 +610,112 @@ func runREPL(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, m
 			fmt.Println("Back to menu.")
 			return
 		case "/help":
-			fmt.Println("/help — this help\n/memory — show memory\n/clear — clear conversation\n/exit — back to menu")
+			fmt.Println("/help — this help\n/memory — show memory\n/clear — clear this chat\n/chats — list chats\n/new [title] — start a new chat\n/open <number or id> — switch chat\n/summarise — save durable facts from this chat to memory\n/shell — toggle shell commands\n/exit — back to menu")
 			continue
 		case "/memory":
+			if appDB != nil {
+				if mems, err := appDB.ListMemories(); err == nil && len(mems) > 0 {
+					for _, m := range mems {
+						fmt.Printf("- [%s] %s\n", m.Kind, m.Text)
+					}
+					continue
+				}
+			}
 			fmt.Println(loadMemory(cfg.MemoryPath))
 			continue
 		case "/clear":
-			*messages = []Message{{Role: "system", Content: systemPrompt(cfg.UserName, loadMemory(cfg.MemoryPath), cfg.BaseURL, cfg.Model)}}
+			if appDB != nil && chatID != "" {
+				_ = appDB.ClearChat(chatID)
+			}
+			*messages = []Message{{Role: "system", Content: systemPrompt(cfg.UserName, memoryContextFor("", cfg.MemoryPath), cfg.BaseURL, cfg.Model)}}
 			fmt.Println("Conversation cleared.")
 			continue
+		case "/chats":
+			if appDB == nil {
+				fmt.Println("No database — chats are not persistent in this run.")
+				continue
+			}
+			chats, _ := appDB.ListChats()
+			if len(chats) == 0 {
+				fmt.Println("(no chats yet)")
+				continue
+			}
+			for i, c := range chats {
+				mark := " "
+				if c.ID == chatID {
+					mark = "*"
+				}
+				fmt.Printf("  %s %d  %s  (%d messages, %s)\n", mark, i+1, c.Title, c.MsgCount, c.UpdatedAt.Format("2006-01-02 15:04"))
+			}
+			continue
+		case "/summarise":
+			if appDB == nil || chatID == "" {
+				fmt.Println("No database — nothing to summarise.")
+				continue
+			}
+			n, err := summariseChat(client, appDB, chatID)
+			if err != nil {
+				fmt.Println("Summarise failed:", err)
+				continue
+			}
+			fmt.Printf("Saved %d new fact(s) to memory.\n", n)
+			continue
+		case "/shell":
+			runner.SetAllowShell(!runner.shellAllowed())
+			cfg.AllowShell = runner.shellAllowed()
+			saveRuntimeConfig(cfg)
+			if cfg.AllowShell {
+				fmt.Println("Shell commands are now ON. Only use in a folder you trust.")
+			} else {
+				fmt.Println("Shell commands are now OFF.")
+			}
+			continue
 		}
+		if strings.HasPrefix(input, "/new") {
+			if appDB == nil {
+				fmt.Println("No database — cannot start a persistent chat.")
+				continue
+			}
+			title := strings.TrimSpace(strings.TrimPrefix(input, "/new"))
+			c, err := appDB.CreateChat(title)
+			if err != nil {
+				fmt.Println("Could not create chat:", err)
+				continue
+			}
+			chatID = loadChatInto(c.ID, messages, systemPrompt(cfg.UserName, memoryContextFor("", cfg.MemoryPath), cfg.BaseURL, cfg.Model))
+			fmt.Printf("New chat: %s\n", c.Title)
+			continue
+		}
+		if strings.HasPrefix(input, "/open ") {
+			if appDB == nil {
+				fmt.Println("No database — cannot switch chats.")
+				continue
+			}
+			which := strings.TrimSpace(strings.TrimPrefix(input, "/open "))
+			chats, _ := appDB.ListChats()
+			target := ""
+			if n, err := strconv.Atoi(which); err == nil && n >= 1 && n <= len(chats) {
+				target = chats[n-1].ID
+			} else {
+				target = which
+			}
+			if _, err := appDB.GetChat(target); err != nil {
+				fmt.Println("No such chat:", which, "— use /chats to list them.")
+				continue
+			}
+			chatID = loadChatInto(target, messages, systemPrompt(cfg.UserName, memoryContextFor("", cfg.MemoryPath), cfg.BaseURL, cfg.Model))
+			if c, err := appDB.GetChat(chatID); err == nil {
+				fmt.Printf("Opened chat: %s (%d messages)\n", c.Title, c.MsgCount)
+			}
+			continue
+		}
+		before := len(*messages)
+		refreshSystemFor(cfg, messages, input)
 		reply := runTurn(client, runner, tools, messages, input)
+		persistTurn(chatID, before, *messages)
+		if n := maybeAutoSummarise(client, appDB, chatID); n > 0 {
+			fmt.Printf("(saved %d new fact(s) to memory)\n", n)
+		}
 		fmt.Println("Muse> " + reply)
 		fmt.Println()
 	}
