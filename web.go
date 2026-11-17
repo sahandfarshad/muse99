@@ -13,7 +13,7 @@ import (
 )
 
 // Muse99 Web UI — clean, minimal chat dashboard, no build step.
-//   muse99 --web --port 8080 --allow-shell
+//   muse99 --web --port 3759 --allow-shell
 // Tabs: Chat | Files | Tasks | Memory | Servers | Settings
 // The address is shown at the top of the page AND in the SSH menu.
 //
@@ -71,11 +71,49 @@ func (c *webController) IsRunning() bool {
 
 func (c *webController) Address() string { return webAddressFor(c.cfg) }
 
+// webPIDPath / webLogPath: the installer starts the web UI detached,
+// so it leaves a PID file (and its log) in ~/.muse99. The menu and
+// uninstall use the PID file to find and stop that process.
+func webPIDPath() string { return filepath.Join(configDir(), "web.pid") }
+func webLogPath() string { return filepath.Join(configDir(), "web.log") }
+
+func writeWebPID() {
+	_ = os.MkdirAll(configDir(), 0o700)
+	_ = os.WriteFile(webPIDPath(), []byte(fmt.Sprint(os.Getpid())), 0o644)
+}
+
+func removeWebPID() { _ = os.Remove(webPIDPath()) }
+
+// externalWebRunning reports whether a web UI is serving on this
+// config's port in ANOTHER process (e.g. started by install.sh).
+// It probes the status endpoint, so a stale PID file alone is not
+// enough to claim the UI is up.
+func externalWebRunning(cfg Config) bool {
+	if pid := readWebPID(); pid > 0 && !processAlive(pid) {
+		return false
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/status", cfg.WebPort))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// anyWebRunning is true when this process runs the UI or another one does.
+func (c *webController) anyWebRunning(cfg Config) bool {
+	return c.IsRunning() || externalWebRunning(cfg)
+}
+
 // Start launches the web UI in the background (non-blocking).
+// NOTE: this function unlocks c.mu part-way through (before the
+// bind wait) — do NOT add a deferred Unlock here, it would unlock
+// an already-unlocked mutex and panic.
 func (c *webController) Start(cfg Config) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.running {
+		c.mu.Unlock()
 		return fmt.Errorf("web UI is already running at %s", webAddressFor(cfg))
 	}
 	s := &webServer{client: c.client, runner: c.runner, tools: c.tools, cfg: cfg, messages: []Message{{Role: "system", Content: c.system}}, system: c.system, db: appDB}
@@ -103,6 +141,10 @@ func (c *webController) Start(cfg Config) error {
 	if cfg.TLSEnabled && !hasCerts {
 		fmt.Println("Warning: TLS is on but no certificate was found — serving plain HTTP. Set up SSL from the menu first.")
 	}
+	// Unlock before waiting: the serve goroutine needs the lock to
+	// report a bind failure, and Start must see that failure instead
+	// of reading a stale `running=true` while holding the lock.
+	c.mu.Unlock()
 	go func() {
 		var err error
 		if cfg.TLSEnabled && hasCerts {
@@ -121,6 +163,17 @@ func (c *webController) Start(cfg Config) error {
 	}()
 	// Give the listener a moment to bind so a bad port fails fast.
 	time.Sleep(150 * time.Millisecond)
+	// Leave a PID file so the menu / installer / uninstall can find
+	// this process even after the parent shell exits. Only write it
+	// when this server actually bound the port — if the port was
+	// already taken, this process is exiting and must not claim it.
+	if !c.IsRunning() {
+		// The listener failed (usually "address already in use") —
+		// report it instead of returning nil and hanging forever in
+		// startWeb's <-done wait with no server running.
+		return fmt.Errorf("could not listen on port %d (is another web UI already running there?)", cfg.WebPort)
+	}
+	writeWebPID()
 	return nil
 }
 
@@ -136,6 +189,7 @@ func (c *webController) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := srv.Shutdown(ctx)
+	removeWebPID()
 	c.mu.Lock()
 	c.running = false
 	c.mu.Unlock()
@@ -181,7 +235,8 @@ func (s *webServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"servers": len(loadServers()), "goals": len(loadGoals()),
 		"provider": s.cfg.Provider, "address": webAddressFor(s.cfg),
 		"port": s.cfg.WebPort, "domain": s.cfg.Domain, "tls": s.cfg.TLSEnabled,
-		"usage": usageTotalsJSON(),
+		"api_key_set": s.cfg.APIKey != "" || s.client.APIKey != "",
+		"usage":       usageTotalsJSON(),
 	})
 }
 
@@ -525,6 +580,14 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// v5: no API key yet — the key is set in Settings, not on the
+	// command line, so say so plainly instead of a raw API error.
+	// (The live client is rebuilt from Settings, so check both.)
+	if strings.TrimSpace(s.cfg.APIKey) == "" && strings.TrimSpace(s.client.APIKey) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatResp{Reply: noAPIKeyNotice, Tools: nil, ChatID: s.currentChatID})
+		return
+	}
 	// Switch chats when the caller asks for one; otherwise keep the
 	// current chat. Without a DB this is the old single-chat behaviour.
 	if req.ChatID != "" && req.ChatID != s.currentChatID {
@@ -550,6 +613,11 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(chatResp{Reply: reply, Tools: tools, ChatID: s.currentChatID})
 }
+
+// noAPIKeyNotice is what chat returns (and the UI shows) when no
+// provider API key has been set yet. It points at Settings, where
+// the key is added — there is no terminal setup step any more.
+const noAPIKeyNotice = "No API key set yet — I can't chat until you add one.\n\nOpen Settings → Provider & model (the Settings tab above), pick your provider, paste your API key, press Fetch models, choose a model, and press Save. Then come back here and chat."
 
 func (s *webServer) handleTask(w http.ResponseWriter, r *http.Request) {
 	// POST /api/task {goal} starts an autonomous task in the background.
@@ -846,7 +914,7 @@ h3.sec{font-size:17px;margin:6px 0 14px;letter-spacing:-.01em}
 <header><div class="topbar"><span class="brand"><span class="mark">✦</span>Muse99</span><span class="pill spark" id="mode">…</span><span class="pill model" id="model"></span><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><span class="spacer"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust."><input type="checkbox" id="shell-toggle" onchange="toggleShell()"> Shell</label><button class="iconbtn" onclick="clearChat()">Clear chat</button></div>
 <nav class="tabs"><button class="active" onclick="tab('chat',this)">Chat</button><button onclick="tab('files',this)">Files</button><button onclick="tab('tasks',this)">Tasks</button><button onclick="tab('memory',this)">Memory</button><button onclick="tab('servers',this)">Servers</button><button onclick="tab('settings',this)">Settings</button></nav></header>
 <div class="layout"><aside id="sidebar"><h3>Chats</h3><input id="chat-search" placeholder="Search chats…" oninput="loadChats()"><button class="btn primary" style="width:100%;justify-content:center;margin-bottom:10px" onclick="newChat()">+ New chat</button><div id="chatlist"></div></aside><main>
-<div id="pane-chat" class="pane active"><div id="chat"></div><div class="muted" id="thinking" style="display:none">Muse99 is working…</div></div>
+<div id="pane-chat" class="pane active"><div id="nokey" class="card" style="display:none"><h3>No API key yet</h3><p class="sub">Muse99 can't chat until you add a provider API key. It only takes a minute, and it happens right here in the web UI — no terminal commands.</p><button class="btn primary" onclick="showSettingsTab()">Open Settings → Provider &amp; model</button></div><div id="chat"></div><div class="muted" id="thinking" style="display:none">Muse99 is working…</div></div>
 <div id="pane-files" class="pane"><h3 class="sec">Files</h3><div id="filelist"></div><pre id="fileview">Click a file to view it.</pre></div>
 <div id="pane-tasks" class="pane"><h3 class="sec">Autonomous tasks</h3><div class="card"><div class="modelrow"><input id="taskgoal" placeholder="Build a todo app in ./todo-app with tests…"><button class="btn primary" onclick="startTask()">Start task</button></div><p class="note">Muse99 plans the task, builds it, runs the tests, fixes failures, and only stops when it can say DONE.</p></div><div id="tasklist"></div></div>
 <div id="pane-memory" class="pane"><h3 class="sec">Memory</h3><p class="note">Facts Muse99 remembers about you, with kind and source. They are used in every chat. Delete one here to forget it.</p><div id="memlist"></div><button class="btn" onclick="summariseChat()">Summarise current chat into memory</button><h3 class="sec" style="margin-top:24px">Memory file</h3><textarea id="mem" rows="12"></textarea><br><br><button class="btn primary" onclick="saveMemory()">Save memory file</button></div>
@@ -864,7 +932,7 @@ h3.sec{font-size:17px;margin:6px 0 14px;letter-spacing:-.01em}
 </div>
 <div class="card"><h3>Web &amp; access</h3>
 <label>Your name</label><input id="set-user" placeholder="Your name">
-<label>Web port</label><input id="set-port" placeholder="8080" type="number">
+<label>Web port</label><input id="set-port" placeholder="3759" type="number">
 <label>Domain <span class="hint">— optional, for the web link</span></label><input id="set-domain" placeholder="muse99.example.com">
 <label style="display:flex;gap:8px;align-items:center"><input id="set-tls" type="checkbox" style="width:auto"> SSL / HTTPS on</label>
 <label style="display:flex;gap:8px;align-items:center"><input id="set-shell" type="checkbox" style="width:auto"> Allow shell commands</label>
@@ -878,6 +946,7 @@ h3.sec{font-size:17px;margin:6px 0 14px;letter-spacing:-.01em}
 <script>
 const chat=document.getElementById('chat'),inp=document.getElementById('in'),think=document.getElementById('thinking');
 document.getElementById('addr').textContent=window.location.href;
+function showSettingsTab(){document.querySelectorAll('.tabs button')[5].click();}
 function tab(name,btn){document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));document.getElementById('pane-'+name).classList.add('active');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');if(name==='files')loadFiles('');if(name==='tasks')loadTasks();if(name==='memory'){loadMemory();loadMemories();}if(name==='servers')loadServers();if(name==='settings')loadSettings();}
 function add(t,cls,tools){const d=document.createElement('div');d.className='msg '+cls;d.textContent=t;if(tools&&tools.length){const x=document.createElement('div');x.className='tools';x.textContent='Tools: '+tools.join(' · ');d.appendChild(x);}chat.appendChild(d);window.scrollTo(0,document.body.scrollHeight);}
 add("Hey Takahashi, I'm Muse99 in your browser. Give me a task and I'll work it till the end — files, shell, tests, and verification.","muse");
@@ -895,7 +964,7 @@ async function loadMemories(){const r=await fetch('/api/memories');const j=await
 async function deleteMemory(id){await fetch('/api/memories/'+id,{method:'DELETE'});loadMemories();}
 async function summariseChat(){const r=await fetch('/api/chats/'+(currentChatId||'')+'/summarise',{method:'POST'});const j=await r.json();alert('Saved '+(j.saved||0)+' new fact(s) to memory.');loadMemories();}
 async function toggleShell(){const on=document.getElementById('shell-toggle').checked;await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow_shell:on})});document.getElementById('shellbox').classList.toggle('on',on);loadStatus();}
-async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;document.getElementById('model').textContent=s.model+' · '+s.user;if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
+async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;document.getElementById('model').textContent=s.model+' · '+s.user;if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);const nk=document.getElementById('nokey');if(nk){nk.style.display=s.api_key_set?'none':'block';}const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
 loadChats();
 document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;add(v,'user');inp.value='';think.style.display='block';try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';add(j.reply||j.error||'(no reply)','muse',j.tools);}catch(err){think.style.display='none';add('Could not reach server: '+err,'muse');}});
 async function clearChat(){await fetch('/api/clear',{method:'POST'});chat.innerHTML='';add('Chat cleared. Memory is kept.','muse');}
@@ -915,7 +984,7 @@ async function refreshModelList(){const p=document.getElementById('set-provider'
 async function fetchModels(){const btn=document.getElementById('fetch-models-btn');btn.disabled=true;modelStatus('Fetching models from provider…','');try{const b={provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value};const r=await fetch('/api/models/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error){modelStatus(j.error,'bad');}else{fillModelList(j.models,j.source,j.fetched_at);if(!j.models||!j.models.length)modelStatus('Provider returned no models — type a model name by hand, or try another provider.','bad');}}catch(e){modelStatus('Fetch failed: '+e,'bad');}btn.disabled=false;}
 async function testModel(){const m=document.getElementById('set-model').value.trim();if(!m){modelStatus('Pick or type a model first.','bad');return;}const btn=document.getElementById('test-model-btn');btn.disabled=true;modelStatus('Testing '+m+'…','');try{const b={provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value,model:m};const r=await fetch('/api/models/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok){modelStatus('✓ '+j.model+' works — replied "'+j.reply+'" in '+j.latency_ms+' ms.','ok');}else{modelStatus('✗ '+j.model+' failed: '+(j.error||'unknown error'),'bad');}}catch(e){modelStatus('Test failed: '+e,'bad');}btn.disabled=false;}
 let settingsData=null;
-async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+'<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';document.getElementById('set-base').value=j.base_url||'';document.getElementById('set-model').value=j.model||'';document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||8080;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';document.getElementById('set-model').value=p.model||'';}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}refreshModelList();}
-async function saveSettings(){const b={active_provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,model:document.getElementById('set-model').value,api_key:document.getElementById('set-key').value,user_name:document.getElementById('set-user').value,port:parseInt(document.getElementById('set-port').value||'8080'),domain:document.getElementById('set-domain').value,tls_enabled:document.getElementById('set-tls').checked,allow_shell:document.getElementById('set-shell').checked};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});alert('Saved — restart the web UI from the SSH menu if you changed the port or SSL.');loadSettings();loadStatus();}
+async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+'<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';document.getElementById('set-base').value=j.base_url||'';document.getElementById('set-model').value=j.model||'';document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||3759;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';document.getElementById('set-model').value=p.model||'';}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}refreshModelList();}
+async function saveSettings(){const b={active_provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,model:document.getElementById('set-model').value,api_key:document.getElementById('set-key').value,user_name:document.getElementById('set-user').value,port:parseInt(document.getElementById('set-port').value||'3759'),domain:document.getElementById('set-domain').value,tls_enabled:document.getElementById('set-tls').checked,allow_shell:document.getElementById('set-shell').checked};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});alert('Saved — restart the web UI from the SSH menu if you changed the port or SSL.');loadSettings();loadStatus();}
 </script></body></html>
 `
