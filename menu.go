@@ -26,11 +26,13 @@ func httpGet(url string) (*http.Response, error) {
 // With a domain + SSL it shows https://your-domain, otherwise
 // http://<lan-ip>:<port>.
 //
-// Menu (v2):
+// Menu (v5):
 //   1 Start web UI   2 Terminal chat   3 Stop web UI   4 Restart web UI
 //   5 Choose web port   6 Set domain   7 Set up SSL / Let's Encrypt
 //   8 Update Muse99   9 Providers / API keys   10 Show memory
-//   11 Show usage   12 Show web address / status   13 Quit
+//   11 Show usage   12 Show web address / status   13 Chats
+//   14 Toggle shell commands   15 (was Quit)   16 Uninstall Muse99
+//   17 Quit
 
 func webAddressFor(cfg Config) string {
 	if cfg.Domain != "" {
@@ -69,7 +71,7 @@ func outboundIP() string {
 }
 
 func printMenuHeader(cfg Config, ctrl *webController) {
-	webRunning := ctrl != nil && ctrl.IsRunning()
+	webRunning := ctrl != nil && ctrl.anyWebRunning(cfg)
 	fmt.Print("\033[H\033[2J") // clear screen, keep it tidy over SSH
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Printf("  ✦ Muse99  —  Web UI: %s\n", webAddressFor(cfg))
@@ -92,6 +94,9 @@ func printMenuHeader(cfg Config, ctrl *webController) {
 		mode = "Muse Spark — Muse mode"
 	}
 	fmt.Printf("  Provider: %s  ·  Model: %s  ·  %s\n", cfg.Provider, cfg.Model, mode)
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		fmt.Println("  No API key yet — open the web UI and add one in Settings → Provider & model.")
+	}
 	shell := "OFF"
 	if cfg.AllowShell {
 		shell = "ON"
@@ -162,9 +167,10 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 		fmt.Println("  12 Show web address / status")
 		fmt.Println("  13 Chats")
 		fmt.Println("  14 Toggle shell commands")
-		fmt.Println("  15 Quit")
+		fmt.Println("  16 Uninstall Muse99")
+		fmt.Println("  17 Quit")
 		fmt.Println()
-		fmt.Print("  Choose [1-15]: ")
+		fmt.Print("  Choose [1-17]: ")
 		if !scanner.Scan() {
 			return
 		}
@@ -173,7 +179,7 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 
 		switch choice {
 		case "1":
-			if ctrl.IsRunning() {
+			if ctrl.anyWebRunning(*cfg) {
 				fmt.Println("Web UI is already running at", webAddressFor(*cfg))
 			} else {
 				if err := ctrl.Start(*cfg); err != nil {
@@ -193,14 +199,27 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			messages = []Message{{Role: "system", Content: system}}
 
 		case "3":
-			if err := ctrl.Stop(); err != nil {
-				fmt.Println(err)
+			if ctrl.IsRunning() {
+				if err := ctrl.Stop(); err != nil {
+					fmt.Println(err)
+				} else {
+					fmt.Println("Web UI stopped.")
+				}
+			} else if externalWebRunning(*cfg) {
+				if err := stopExternalWeb(); err != nil {
+					fmt.Println("Could not stop the web UI:", err)
+				} else {
+					fmt.Println("Web UI stopped.")
+				}
 			} else {
-				fmt.Println("Web UI stopped.")
+				fmt.Println("Web UI is not running")
 			}
 			pause(scanner)
 
 		case "4":
+			if !ctrl.IsRunning() && externalWebRunning(*cfg) {
+				_ = stopExternalWeb()
+			}
 			if err := ctrl.Restart(*cfg, system); err != nil {
 				fmt.Println("Could not restart web UI:", err)
 			} else {
@@ -253,7 +272,7 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 				fmt.Println("You can also run the installer again:")
 				fmt.Println("  curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash")
 			} else {
-				fmt.Println("Update done. Quit the menu (option 13) and run muse99 again to use the new version.")
+				fmt.Println("Update done. Quit the menu (option 17) and run muse99 again to use the new version.")
 			}
 			pause(scanner)
 
@@ -337,15 +356,65 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			}
 			pause(scanner)
 
-		case "15", "q", "quit", "exit":
+		case "16":
+			if uninstallFlow(cfg, ctrl, scanner) {
+				return
+			}
+			pause(scanner)
+
+		case "17", "q", "quit", "exit":
 			fmt.Println("Bye, " + cfg.UserName + ".")
 			return
 
 		default:
-			fmt.Println("Please choose 1-15.")
+			fmt.Println("Please choose 1-17.")
 			pause(scanner)
 		}
 	}
+}
+
+// uninstallFlow is menu option 16. It stops the web UI, shows exactly
+// what will be removed, and only uninstalls after the user types YES.
+// Data (~/.muse99) is kept unless the user says yes. Returns true when
+// Muse99 was uninstalled, so the menu exits right after.
+func uninstallFlow(cfg *Config, ctrl *webController, scanner *bufio.Scanner) bool {
+	t := defaultUninstallTarget()
+	plan := planUninstall(t, false)
+	fmt.Println("Uninstall Muse99 — this will remove:")
+	if len(plan.Remove) == 0 {
+		fmt.Println("  (nothing found to remove — is the binary already gone?)")
+	}
+	for _, r := range plan.Remove {
+		fmt.Println("  -", r)
+	}
+	for _, k := range plan.Keep {
+		fmt.Println("  (kept)", k)
+	}
+	fmt.Println()
+	if !confirmUninstall(scanner, "uninstall Muse99") {
+		fmt.Println("Uninstall cancelled — nothing was removed.")
+		return false
+	}
+	removeData := false
+	fmt.Print("Also delete your Muse99 data (~/.muse99: config, chats, memory, usage)? [y/N]: ")
+	if scanner.Scan() {
+		a := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		removeData = a == "y" || a == "yes"
+	}
+	// Stop the web UI first — including one started by the installer
+	// in another process.
+	if ctrl.IsRunning() {
+		_ = ctrl.Stop()
+	} else if externalWebRunning(*cfg) {
+		_ = stopExternalWeb()
+	}
+	removed, kept, err := runUninstall(t, removeData)
+	if err != nil {
+		fmt.Println("Uninstall failed:", err)
+		return false
+	}
+	printUninstallResult(removed, kept)
+	return true
 }
 
 // providerMenu lists providers, switches the active one, and lets the
