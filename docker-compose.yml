@@ -4,7 +4,7 @@ services:
     container_name: muse99
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "3759:3759"
     environment:
       MODEL_API_KEY: ${MODEL_API_KEY:?set MODEL_API_KEY in .env}
       MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-https://api.meta.ai/v1}
@@ -13,7 +13,7 @@ services:
     volumes:
       - muse99-data:/root/.muse99
       - ./work:/app/work
-    command: ["--menu=false", "--web", "--port", "8080", "--allow-shell", "--workdir", "/app/work"]
+    command: ["--menu=false", "--web", "--port", "3759", "--allow-shell", "--workdir", "/app/work"]
 
 volumes:
   muse99-data:
