@@ -24,9 +24,20 @@ func loadMemory(path string) string {
 	return strings.TrimSpace(s)
 }
 
+// rememberFact saves a durable fact. With the v3 DB open it goes into
+// the database (kind is classified automatically) and MEMORY.md is
+// re-exported from the DB; without a DB it appends to MEMORY.md as
+// before, so old callers keep working.
 func rememberFact(path, fact string) error {
-	if path == "" || strings.TrimSpace(fact) == "" {
+	fact = strings.TrimSpace(fact)
+	if path == "" || fact == "" {
 		return fmt.Errorf("no memory file or empty fact")
+	}
+	if appDB != nil {
+		if _, _, err := appDB.AddMemory(fact, "", ""); err != nil {
+			return err
+		}
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -36,7 +47,7 @@ func rememberFact(path, fact string) error {
 		return err
 	}
 	defer f.Close()
-	line := fmt.Sprintf("- %s — %s\n", time.Now().Format("2006-01-02"), strings.TrimSpace(fact))
+	line := fmt.Sprintf("- %s — %s\n", time.Now().Format("2006-01-02"), fact)
 	_, err = f.WriteString(line)
 	return err
 }
