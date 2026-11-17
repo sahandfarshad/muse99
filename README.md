@@ -53,11 +53,53 @@ Just run `muse99` over SSH:
   8  Update Muse99
   9  Providers / API keys
   10 Show memory
-  11 Show web address / status
-  12 Quit
+  11 Show usage
+  12 Show web address / status
+  13 Chats
+  14 Toggle shell commands
+  15 Quit
 ```
 
-Everything the server needs is in the menu: start / stop / restart the web UI, change its port, set a domain, set up SSL with Let's Encrypt (it checks for certbot and for existing certificates first), update Muse99 itself to the latest release, and switch API providers. The web link on top shows `https://your-domain` once a domain and SSL are set, otherwise `http://<server-ip>:<port>`.
+Everything the server needs is in the menu: start / stop / restart the web UI, change its port, set a domain, set up SSL with Let's Encrypt (it checks for certbot and for existing certificates first), update Muse99 itself to the latest release, and switch API providers. The web link on top shows `https://your-domain` once a domain and SSL are set, otherwise `http://<server-ip>:<port>`. Option 14 toggles shell commands (same setting as the web UI checkbox), and the menu header shows whether shell is ON or OFF.
+
+## Chats — side chats that survive a restart
+
+Chats are stored in a small database (`~/.muse99/data/muse99.db`, see below), not in memory only. Start a new chat, switch between them, rename, delete, or search by title or text — in the web UI sidebar, or in terminal chat with `/chats`, `/new [title]`, `/open <number or id>`. On restart, every chat and its messages reload. The first user message becomes the chat title automatically.
+
+## Memory — advanced, like Muse's
+
+Each durable fact is a **memory** with text, kind (preference / fact / decision / project / person), source chat, date, and confidence, stored in the same database. When a turn starts, Muse99 scores memories by keyword overlap with your message plus recency, and puts the top ~10 (max ~4000 chars) into the system prompt — so it remembers what matters for *this* question, not just the last lines of a file.
+
+How memories get saved:
+
+- The `remember` tool: the model saves a fact explicitly when you ask it to ("remember that I prefer Go").
+- **Auto-summary**: when a chat reaches 10 new messages since its last summary, Muse99 asks the model once to extract durable facts only (preferences, decisions, projects, names, constraints), dedupes them, and saves the new ones. It does **not** call the model on every turn — that would roughly double your token cost. You can also summarise on demand: "Summarise this chat" in the web Memory tab, or `/summarise` in terminal chat.
+- The Memory tab lists every memory with kind and date — edit or delete one there to correct or forget it.
+
+`MEMORY.md` stays in sync: it is exported from the database (grouped by kind) whenever a memory is saved, and an existing `MEMORY.md` is imported once on first run if the database is empty. Importing never rewrites your file. Token usage totals are also kept in the database (migrated from `usage.json` on first run); `usage.json` is still written as a fallback export.
+
+## Shell — a checkbox, not a flag
+
+Shell commands are **off by default**. Turn them on with the **Allow shell commands** checkbox in the web UI top bar or in Settings, or with SSH menu option 14, or in terminal chat with `/shell`. The warning next to it says it plainly: *"Lets Muse99 run commands on this server. Only turn on in a folder you trust."* Toggling takes effect immediately — no restart — and is saved to `~/.muse99/config.json` (`allow_shell`), so it survives restarts. The old `--allow-shell` flag still works and sets the same setting for that run.
+
+## Browser — check anything
+
+Ask Muse99 to check a page and it uses the `browse_url` tool (`fetch_url` is the same thing, kept for compatibility). Two layers:
+
+- **Layer 1 (default, always on, tiny RAM):** an HTTP fetch with a browser User-Agent, redirects, gzip, 20-second timeout, then the HTML is parsed to clean text (title, headings, main text, links). Covers most docs, blogs, GitHub pages, and static price pages.
+- **Layer 2 (opt-in, JavaScript pages only):** headless Chromium, if it is installed on the server, rendering the page and parsing the DOM the same way. It is **not bundled, not auto-installed, and not run by default** — a Chromium page uses **~300–500 MB RAM**, which is a lot on a 1 GB server. If Chromium is missing, the tool says so and tells you how to install it (`sudo apt update && sudo apt install -y chromium-browser`). Use it sparingly, only when Layer 1 returns nothing useful (e.g. a page that says "enable JavaScript").
+
+## Running on 1 GB
+
+Muse99 is built for a small server — a 1 GB RAM Ubuntu 22.04 box is fine:
+
+- **Binary:** ~10 MB. No Go, no compile, no database server on the box.
+- **RAM when idle:** ~10 MB RSS for the Go process (measured: 9,280 KB with the web UI running). The model runs in the cloud, so there is no model RAM at all — the only thing that costs RAM locally is what the agent itself does.
+- **Database:** one embedded file (`~/.muse99/data/muse99.db`, bbolt — a pure-Go key/value store, no CGO, no daemon). It is memory-mapped, so its RSS roughly follows the file size: tens of KB for normal use. Only the last 100 messages of a chat are held in RAM; the rest stays in the database.
+- **Swap:** if you run anything else heavy on the same box, a 1 GB swap file is a cheap safety net: `sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`.
+- **If memory gets tight:** do not use headless Chromium (Layer 2 browsing, ~300–500 MB per page); keep `web_search` queries small; close chats you no longer need (deleting a chat frees its messages from the database).
+
+Why bbolt and not SQLite: the current SQLite driver (modernc.org/sqlite v1.62) needs the Go 1.26 toolchain, while this project and its CI pin Go 1.23, and it would add ~10 MB to the binary. bbolt builds on Go 1.23 and adds ~1 MB. If a future SQLite driver supports Go 1.23 again, the database layer is one file (`db.go`) and can be swapped.
 
 ## Web UI — clean dashboard
 
@@ -66,7 +108,7 @@ muse99 --web --port 8080 --allow-shell
 # open http://your-server-ip:8080
 ```
 
-A clean, light, minimal chat page — white chat card, user messages on the right, Muse99 on the left, a slim top bar with the model/provider and the web address. Tabs: **Chat | Files | Tasks | Memory | Servers | Settings**. The address is also shown at the top of the web page itself. Settings has a provider dropdown, API base URL / model / key, web port, domain, and SSL on/off (port and SSL need a web UI restart from the menu).
+A clean, light, minimal chat page — white chat card, user messages on the right, Muse99 on the left, a slim top bar with the model/provider and the web address. Tabs: **Chat | Files | Tasks | Memory | Servers | Settings**. The address is also shown at the top of the web page itself. The Chat tab has a sidebar with your chats (New chat, switch, rename, delete, search). Settings has a provider dropdown, API base URL / model / key, web port, domain, SSL on/off, and the **Allow shell commands** checkbox (port and SSL need a web UI restart from the menu).
 
 ## Give it a task — it works till the end
 
@@ -130,9 +172,11 @@ Point your domain at the server (an A record to its IP), open ports 80 and 443, 
 
 In the SSH menu, option 8 (Update Muse99) downloads the latest release binary, checks it runs `--help`, then replaces the current binary. Quit and run `muse99` again to use it. Or just run the one-line installer again — it does the same thing.
 
-## Tools (15)
+## Tools (16)
 
-`read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `run_shell`, `remote_shell`, `git_run`, `fetch_url`, `web_search`, `scaffold_app`, `spawn_subtask`, `get_time`, `remember`, `set_goal`
+`read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `run_shell`, `remote_shell`, `git_run`, `fetch_url`, `browse_url`, `web_search`, `scaffold_app`, `spawn_subtask`, `get_time`, `remember`, `set_goal`
+
+`browse_url` fetches a page as clean text (title + headings + main text + links); set `js: true` only for JavaScript pages, which uses headless Chromium if installed (~300–500 MB RAM). `fetch_url` is the same fetch, kept for compatibility.
 
 `scaffold_app` kinds: `go-cli`, `web-html`, `python-cli`, `node-express`
 
@@ -181,12 +225,15 @@ git push origin v0.1.0
 |---|---|
 | `main.go` | CLI, config, `--task`, `--schedule`, `--web`, `--menu` |
 | `agent.go` | Autonomous loop: plan → act → verify → DONE, 100 steps, sessions |
-| `menu.go` | SSH menu — web address on top, start/stop/restart, port, domain, SSL, update, providers |
-| `web.go` | Clean web dashboard — chat, files, tasks, memory, servers, settings; real start/stop/restart + TLS |
-| `tools.go` | 15 tools incl. edit, search, git, remote SSH, scaffold, sub-agents |
+| `menu.go` | SSH menu — web address on top, start/stop/restart, port, domain, SSL, update, providers, chats, shell toggle |
+| `web.go` | Clean web dashboard — chat sidebar, files, tasks, memory, servers, settings; real start/stop/restart + TLS |
+| `db.go` | Embedded database (bbolt) — persistent chats, memories, usage; scoring, dedupe, auto-summary |
+| `browse.go` | Browser layers: HTTP fetch + HTML-to-text, optional headless Chromium |
+| `tools.go` | 16 tools incl. edit, search, git, remote SSH, scaffold, sub-agents, browse_url |
 | `client.go` | OpenAI-compatible `/chat/completions` client |
 | `prompt.go` | Muse99 persona + Spark detection |
 | `memory.go`, `store.go`, `config.go` | MEMORY.md, tasks/goals/servers/sessions, config + `.env`, provider presets |
+| `usage.go` | Token usage tracking (also kept in the database) |
 | `scheduler.go` | Scheduled prompts |
 | `Dockerfile`, `docker-compose.yml`, `Makefile` | Production packaging |
 | `muse99.service` | systemd unit |
@@ -195,4 +242,4 @@ git push origin v0.1.0
 
 ## Safety
 
-`--allow-shell` is off by default. Turn it on only in a directory you trust. Remote servers are opt-in only. `git_run` blocks `push --force`, `reset --hard`, `clean -f`. The agent asks before irreversible actions, but the shell tool runs what the model asks for — review `TASK.md` and `git diff` before you deploy anything it builds.
+Shell commands are off by default — turn them on only in a directory you trust, with the web UI checkbox or SSH menu option 14 (`--allow-shell` does the same for one run). Remote servers are opt-in only. `git_run` blocks `push --force`, `reset --hard`, `clean -f`. The agent asks before irreversible actions, but the shell tool runs what the model asks for — review `TASK.md` and `git diff` before you deploy anything it builds.
