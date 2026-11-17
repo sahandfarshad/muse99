@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+// DefaultWebPort is the web UI port when the user has not set one.
+// (v5: was 8080; 3759 is the new default. A port saved in
+// ~/.muse99/config.json always wins over this default.)
+const DefaultWebPort = 3759
+
 // Production config: file > env > flags (flags already applied in main).
 // Stored at ~/.muse99/config.json — never commit it, it holds your API keys.
 // Also loads a local .env file if present (KEY=VALUE lines).
