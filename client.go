@@ -52,6 +52,11 @@ type chatResponse struct {
 	Choices []struct {
 		Message Message `json:"message"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
@@ -129,6 +134,11 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	}
 	if len(out.Choices) == 0 {
 		return Message{}, fmt.Errorf("api returned no choices")
+	}
+	// Token usage: capture it for every call (some providers/local
+	// models omit it — then nothing is recorded for that call).
+	if out.Usage != nil {
+		recordUsage(out.Usage.PromptTokens, out.Usage.CompletionTokens)
 	}
 	return out.Choices[0].Message, nil
 }
