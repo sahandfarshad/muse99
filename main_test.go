@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1482,5 +1484,70 @@ func TestWebPageScriptRuns(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("page script check failed: %v\n%s", err, out)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and
+// returns everything fn printed.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// TestWebStartBindBeforePrint is the regression test for the v0.6.1
+// false "Web UI restarted": Start printed "Muse99 web UI: ..." before
+// the listener bound, so a process that failed to bind (port already
+// taken) still left that line in the log — and install.sh greps for
+// exactly that line. Now Start binds first and only prints the line
+// after the bind succeeds.
+func TestWebStartBindBeforePrint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), WebAddr: "127.0.0.1", WebPort: port, Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3"}
+	ctrl := newWebController(cfg, NewClient(cfg.BaseURL, "", cfg.Model), &toolRunner{workdir: cfg.Workdir, memoryPath: filepath.Join(t.TempDir(), "MEMORY.md")}, nil, "s")
+
+	out := captureStdout(t, func() {
+		if err := ctrl.Start(cfg); err == nil {
+			t.Error("Start on a taken port should fail")
+		}
+	})
+	if strings.Contains(out, "Muse99 web UI:") {
+		t.Fatalf("a failed Start must not print the web UI address line, got %q", out)
+	}
+	if _, err := os.Stat(webPIDPath()); err == nil {
+		t.Fatal("a failed Start must not leave a web.pid file")
+	}
+	_ = ln.Close()
+
+	out = captureStdout(t, func() {
+		if err := ctrl.Start(cfg); err != nil {
+			t.Fatalf("Start on a free port should succeed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Muse99 web UI:") {
+		t.Fatalf("a successful Start must print the web UI address line, got %q", out)
+	}
+	if !ctrl.IsRunning() {
+		t.Fatal("controller should report running after Start")
+	}
+	if err := ctrl.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
 	}
 }

@@ -128,6 +128,15 @@ BIN="$INSTALL_DIR/muse99"
 # v7: an already-running web UI is RESTARTED, not left alone — the
 # old process would keep serving the old binary forever, so an
 # update would never take effect until someone stopped it by hand.
+# v9: the restart is VERIFIED. The old code only killed the process
+# named in this install's web.pid / binary path, so a web UI started
+# from another folder kept the port — and the new binary then failed
+# to bind while the installer still printed "Web UI restarted",
+# because the old process kept answering /api/status. Now the script
+# waits until the port actually stops answering before starting the
+# new one, and only claims success when the new process's PID is
+# alive and answering. A failure is reported as an error instead of
+# a success, and the menu still opens so the port can be fixed there.
 PORT=3759
 if [ -f "$HOME/.muse99/config.json" ]; then
   SAVED="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('port') or 3759)" "$HOME/.muse99/config.json" 2>/dev/null || echo 3759)"
@@ -136,43 +145,114 @@ fi
 LOG="$HOME/.muse99/web.log"
 mkdir -p "$HOME/.muse99"
 WEB_ADDR="http://localhost:$PORT"
+
+# port_answers: 0 when a Muse99 web UI answers on $PORT, 1 otherwise.
+port_answers() {
+  curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/status" >/dev/null 2>&1
+}
+
+# wait_port_quiet: wait up to ~$1 half-seconds for the port to stop
+# answering. Returns 0 when quiet, 1 when still answering.
+wait_port_quiet() {
+  _n="${1:-10}"
+  _i=0
+  while [ "$_i" -lt "$_n" ]; do
+    if ! port_answers; then return 0; fi
+    sleep 0.5
+    _i=$((_i + 1))
+  done
+  if port_answers; then return 1; fi
+  return 0
+}
+
+# wait_port_up: wait up to ~$1 half-seconds for the port to answer
+# AND for web.pid to name a live process. Returns 0 on success.
+wait_port_up() {
+  _n="${1:-20}"
+  _i=0
+  while [ "$_i" -lt "$_n" ]; do
+    if port_answers; then
+      _pid="$(cat "$HOME/.muse99/web.pid" 2>/dev/null || true)"
+      case "$_pid" in ''|*[!0-9]*) ;;
+        *) kill -0 "$_pid" 2>/dev/null && return 0 ;;
+      esac
+    fi
+    sleep 0.5
+    _i=$((_i + 1))
+  done
+  return 1
+}
+
 if [ -z "${MUSE99_NO_WEB:-}" ]; then
   RESTARTED=0
-  if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/status" >/dev/null 2>&1; then
+  WEB_FAILED=0
+  if port_answers; then
     echo "Web UI is already running on port $PORT — restarting it with the new version…"
+    # Kill every muse99 web process we can find, not just the one in
+    # this install's PID file: the running one may have been started
+    # from another folder, so its path may not match $BIN.
+    OLD_PIDS=""
     if [ -f "$HOME/.muse99/web.pid" ]; then
-      OLDPID="$(cat "$HOME/.muse99/web.pid" 2>/dev/null || true)"
-      case "$OLDPID" in ''|*[!0-9]*) ;; *)
-        kill "$OLDPID" 2>/dev/null || true
-        for _ in $(seq 1 20); do kill -0 "$OLDPID" 2>/dev/null || break; sleep 0.25; done
+      OLD_PIDS="$(cat "$HOME/.muse99/web.pid" 2>/dev/null || true)"
+    fi
+    # pgrep -f matches command lines — and this script's own text
+    # contains the pattern when run as bash -c "$(curl …)", so
+    # always exclude this shell and its parent from the results.
+    if command -v pgrep >/dev/null 2>&1; then
+      OLD_PIDS="$OLD_PIDS $(pgrep -f "muse99 --menu=false --web" 2>/dev/null | grep -vx "$$" | grep -vx "$PPID" || true)"
+    fi
+    for OLDPID in $OLD_PIDS; do
+      case "$OLDPID" in ''|*[!0-9]*) continue ;; esac
+      kill "$OLDPID" 2>/dev/null || true
+    done
+    rm -f "$HOME/.muse99/web.pid"
+    if ! wait_port_quiet 10; then
+      # Still answering after a graceful kill: force it.
+      for OLDPID in $OLD_PIDS; do
+        case "$OLDPID" in ''|*[!0-9]*) continue ;; esac
         kill -9 "$OLDPID" 2>/dev/null || true
-        ;;
-      esac
-      rm -f "$HOME/.muse99/web.pid"
-    else
-      pkill -f "$BIN --menu=false --web" 2>/dev/null || true
-      sleep 1
+      done
+      if ! wait_port_quiet 10; then
+        # Last resort: kill whatever holds the port. Only reached
+        # while /api/status still answers, so the holder is a
+        # Muse99 web UI, not some other service.
+        if command -v fuser >/dev/null 2>&1; then
+          fuser -k "$PORT/tcp" 2>/dev/null || true
+          wait_port_quiet 10 || true
+        fi
+      fi
     fi
-    RESTARTED=1
+    if port_answers; then
+      echo "" >&2
+      echo "ERROR: could not stop the old web UI on port $PORT." >&2
+      echo "It is still serving the old version. The new binary is installed," >&2
+      echo "but the web UI was NOT restarted." >&2
+      echo "Stop it by hand, then start the new one from the SSH menu (option 1):" >&2
+      echo "  pkill -f \"muse99 --menu=false --web\"" >&2
+      echo "  $BIN --menu=false --web" >&2
+      WEB_FAILED=1
+    else
+      RESTARTED=1
+    fi
   fi
-  nohup "$BIN" --menu=false --web >"$LOG" 2>&1 &
-  # Wait for the "Muse99 web UI: <address>" line (up to ~15s).
-  for _ in $(seq 1 30); do
-    if grep -q "Muse99 web UI:" "$LOG" 2>/dev/null; then break; fi
-    sleep 0.5
-  done
-  FOUND="$(grep -m1 "Muse99 web UI:" "$LOG" 2>/dev/null | sed 's/.*Muse99 web UI: //; s/ (TLS)//')"
-  if [ -n "$FOUND" ]; then WEB_ADDR="$FOUND"; fi
-  if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/status" >/dev/null 2>&1; then
-    if [ "$RESTARTED" = 1 ]; then
-      echo "Web UI restarted: $WEB_ADDR"
+  if [ "$WEB_FAILED" = 0 ]; then
+    nohup "$BIN" --menu=false --web >"$LOG" 2>&1 &
+    if wait_port_up 20; then
+      FOUND="$(grep -m1 "Muse99 web UI:" "$LOG" 2>/dev/null | sed 's/.*Muse99 web UI: //; s/ (TLS)//')"
+      if [ -n "$FOUND" ]; then WEB_ADDR="$FOUND"; fi
+      if [ "$RESTARTED" = 1 ]; then
+        echo "Web UI restarted: $WEB_ADDR"
+      else
+        echo "Web UI started: $WEB_ADDR"
+      fi
     else
-      echo "Web UI started: $WEB_ADDR"
+      echo "" >&2
+      echo "ERROR: the web UI did not come up on port $PORT." >&2
+      echo "The new binary is installed, but no working web UI is serving it." >&2
+      echo "Check the log: $LOG" >&2
+      echo "You can change the port in the SSH menu (option 5) and start it with option 1." >&2
+      WEB_FAILED=1
     fi
-  else
-    echo "WARNING: the web UI did not start on port $PORT — the port may already be in use." >&2
-    echo "Check the log: $LOG" >&2
-    echo "You can change the port in the SSH menu (option 5) and start it with option 1." >&2
   fi
 fi
 echo ""

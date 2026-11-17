@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -148,6 +149,13 @@ func reloadSystemd(servicePath string) error {
 // stopExternalWeb stops a web UI running in another process (e.g. the
 // one the installer started). It reads ~/.muse99/web.pid and, if that
 // is missing, tries the HTTP status endpoint on the default port.
+//
+// v9: when the PID file is missing it also looks for a muse99 web
+// process by its command line (Linux /proc scan). Without this, a
+// web UI started from another install folder — or whose PID file was
+// lost — could not be stopped at all: Restart/Update would start a
+// new process that cannot bind, while the old one keeps answering,
+// and the caller would report success.
 func stopExternalWeb() error {
 	if pid := readWebPID(); pid > 0 {
 		if p, err := os.FindProcess(pid); err == nil {
@@ -165,7 +173,67 @@ func stopExternalWeb() error {
 		_ = os.Remove(webPIDPath())
 		return nil
 	}
+	for _, pid := range findMuse99WebPIDs() {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		anyLeft := false
+		for _, pid := range findMuse99WebPIDs() {
+			if processAlive(pid) {
+				anyLeft = true
+			}
+		}
+		if !anyLeft {
+			break
+		}
+	}
+	for _, pid := range findMuse99WebPIDs() {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Signal(syscall.SIGKILL)
+		}
+	}
 	return nil
+}
+
+// findMuse99WebPIDs returns the PIDs of muse99 processes running a
+// web UI, by scanning /proc (Linux only). It never returns this
+// process itself. Used only when the PID file is missing.
+func findMuse99WebPIDs() []int {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var out []int
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		args := strings.Split(string(raw), "\x00")
+		isMuse99, isWeb := false, false
+		for _, a := range args {
+			if strings.Contains(a, "muse99") {
+				isMuse99 = true
+			}
+			if a == "--web" {
+				isWeb = true
+			}
+		}
+		if isMuse99 && isWeb {
+			out = append(out, pid)
+		}
+	}
+	return out
 }
 
 func processAlive(pid int) bool {

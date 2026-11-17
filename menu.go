@@ -174,6 +174,15 @@ func refreshClient(cfg *Config, client *Client, ctrl *webController, system *str
 // startDetachedWeb launches the web UI as its own process, so it
 // keeps running after the menu quits. The child owns the database
 // — call handOverDB first so it can open it.
+//
+// v9: two guards against reporting a false success. (1) Before
+// starting, the port must NOT already answer — if the old process
+// survived the stop (stale PID file, installed from another folder),
+// the new child cannot bind and the old one would keep answering,
+// which used to look like a successful start. (2) After the status
+// poll succeeds, the child itself must still be alive: the poll can
+// succeed against a leftover old process while the new child has
+// already died on a bind failure.
 func startDetachedWeb(cfg Config) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -181,6 +190,9 @@ func startDetachedWeb(cfg Config) error {
 	}
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
+	}
+	if externalWebRunning(cfg) {
+		return fmt.Errorf("a web UI is still answering on port %d — stop it first (menu option 3), then try again", cfg.WebPort)
 	}
 	_ = os.MkdirAll(configDir(), 0o700)
 	logFile, err := os.OpenFile(webLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -206,6 +218,14 @@ func startDetachedWeb(cfg Config) error {
 			ok := resp.StatusCode == http.StatusOK
 			resp.Body.Close()
 			if ok {
+				// Give a just-started child a moment to die on a
+				// bind failure, then prove the child itself is
+				// alive — the status answer alone may come from
+				// a leftover old process.
+				time.Sleep(300 * time.Millisecond)
+				if !processAlive(cmd.Process.Pid) {
+					return fmt.Errorf("web UI process (PID %d) exited — it probably could not bind port %d; see %s", cmd.Process.Pid, cfg.WebPort, webLogPath())
+				}
 				return nil
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -107,9 +108,14 @@ func (c *webController) anyWebRunning(cfg Config) bool {
 }
 
 // Start launches the web UI in the background (non-blocking).
-// NOTE: this function unlocks c.mu part-way through (before the
-// bind wait) — do NOT add a deferred Unlock here, it would unlock
-// an already-unlocked mutex and panic.
+// v9: the listener is bound FIRST (net.Listen) and the "Muse99 web
+// UI: ..." line is printed only after the bind succeeds. Before
+// this, the line was printed inside the serve goroutine before
+// ListenAndServe ran, so a process that failed to bind (port already
+// taken) still left a "Muse99 web UI: ..." line in the log — and
+// install.sh greps for exactly that line, so it reported
+// "Web UI restarted" for a web UI that never started, while the old
+// process kept serving the old version.
 func (c *webController) Start(cfg Config) error {
 	c.mu.Lock()
 	if c.running {
@@ -129,7 +135,6 @@ func (c *webController) Start(cfg Config) error {
 	addr := fmt.Sprintf("%s:%d", cfg.WebAddr, cfg.WebPort)
 	c.srv = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	c.cfg = cfg
-	c.running = true
 	certFile, keyFile, hasCerts := "", "", false
 	if cfg.TLSEnabled {
 		if cfg.CertFile != "" && cfg.KeyFile != "" {
@@ -141,18 +146,27 @@ func (c *webController) Start(cfg Config) error {
 	if cfg.TLSEnabled && !hasCerts {
 		fmt.Println("Warning: TLS is on but no certificate was found — serving plain HTTP. Set up SSL from the menu first.")
 	}
-	// Unlock before waiting: the serve goroutine needs the lock to
-	// report a bind failure, and Start must see that failure instead
-	// of reading a stale `running=true` while holding the lock.
+	// Bind now, while holding the lock: a failure here is immediate
+	// and synchronous, so Start can report it instead of a goroutine
+	// failing later with the "started" line already printed.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("could not listen on port %d (is another web UI already running there?)", cfg.WebPort)
+	}
+	c.running = true
 	c.mu.Unlock()
+	if cfg.TLSEnabled && hasCerts {
+		fmt.Printf("Muse99 web UI: %s (TLS)\n", webAddressFor(cfg))
+	} else {
+		fmt.Printf("Muse99 web UI: %s\n", webAddressFor(cfg))
+	}
 	go func() {
 		var err error
 		if cfg.TLSEnabled && hasCerts {
-			fmt.Printf("Muse99 web UI: %s (TLS)\n", webAddressFor(cfg))
-			err = c.srv.ListenAndServeTLS(certFile, keyFile)
+			err = c.srv.ServeTLS(ln, certFile, keyFile)
 		} else {
-			fmt.Printf("Muse99 web UI: %s\n", webAddressFor(cfg))
-			err = c.srv.ListenAndServe()
+			err = c.srv.Serve(ln)
 		}
 		if err != nil && err != http.ErrServerClosed {
 			fmt.Println("Web server error:", err)
@@ -161,18 +175,10 @@ func (c *webController) Start(cfg Config) error {
 		c.running = false
 		c.mu.Unlock()
 	}()
-	// Give the listener a moment to bind so a bad port fails fast.
-	time.Sleep(150 * time.Millisecond)
 	// Leave a PID file so the menu / installer / uninstall can find
-	// this process even after the parent shell exits. Only write it
-	// when this server actually bound the port — if the port was
-	// already taken, this process is exiting and must not claim it.
-	if !c.IsRunning() {
-		// The listener failed (usually "address already in use") —
-		// report it instead of returning nil and hanging forever in
-		// startWeb's <-done wait with no server running.
-		return fmt.Errorf("could not listen on port %d (is another web UI already running there?)", cfg.WebPort)
-	}
+	// this process even after the parent shell exits. Only written
+	// after a successful bind — a process that could not listen
+	// must not claim the port.
 	writeWebPID()
 	return nil
 }
