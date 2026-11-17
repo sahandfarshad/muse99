@@ -144,6 +144,9 @@ func (fc *FileConfig) setProvider(p Provider) {
 	if p.Name == "" {
 		return
 	}
+	// v6: never persist a "models/..." prefixed id (Gemini's native
+	// list format) — chat completions need the bare id.
+	p.Model = normalizeModelID(p.Model)
 	old := fc.Providers[p.Name]
 	if p.BaseURL == "" {
 		p.BaseURL = old.BaseURL
