@@ -63,13 +63,14 @@ func (cfg *Config) switchProvider(name string) bool {
 
 func loadConfig() Config {
 	var cfg Config
+	var flagAllowShell bool
+	flag.BoolVar(&flagAllowShell, "allow-shell", false, "Allow run_shell tool")
 	flag.StringVar(&cfg.BaseURL, "base-url", envOr("MODEL_API_BASE_URL", "https://api.meta.ai/v1"), "API base URL (OpenAI-compatible)")
 	flag.StringVar(&cfg.APIKey, "api-key", envOr("MODEL_API_KEY", os.Getenv("OPENAI_API_KEY")), "API key (or MODEL_API_KEY env)")
 	flag.StringVar(&cfg.Model, "model", envOr("MODEL_ID", "muse-spark-1.3"), "Model ID")
 	flag.StringVar(&cfg.UserName, "user", envOr("MUSE_USER_NAME", "Takahashi"), "User's name")
 	flag.StringVar(&cfg.MemoryPath, "memory", os.Getenv("MUSE_MEMORY"), "Path to MEMORY.md")
 	flag.StringVar(&cfg.Workdir, "workdir", envOr("MUSE_WORKDIR", mustCwd()), "Working directory for file/shell tools")
-	flag.BoolVar(&cfg.AllowShell, "allow-shell", false, "Allow run_shell tool")
 	flag.StringVar(&cfg.Prompt, "prompt", "", "Single prompt, then exit (non-interactive)")
 	flag.BoolVar(&cfg.Web, "web", false, "Start web UI instead of terminal chat")
 	flag.IntVar(&cfg.WebPort, "port", 8080, "Web UI port (with --web)")
@@ -93,6 +94,11 @@ func loadConfig() Config {
 		}
 	}
 	applyFileConfig(&cfg, fc)
+	// --allow-shell on the command line wins over the saved setting;
+	// otherwise the saved checkbox value (from the web UI / menu) applies.
+	if flagAllowShell {
+		cfg.AllowShell = true
+	}
 	// A provider switch must also refresh the stored key if the file had
 	// a key for the active provider and no env key overrode it.
 	if cfg.APIKey == "" {
@@ -128,6 +134,14 @@ func mustCwd() string {
 
 func main() {
 	cfg := loadConfig()
+	// Open the embedded database (chats, memories, usage). If it
+	// cannot open, keep going with the old file-only behaviour so a
+	// DB problem never stops the agent from starting.
+	if db, err := openAppDB(); err != nil {
+		fmt.Println("Note: database could not be opened, using files only:", err)
+	} else {
+		defer db.Close()
+	}
 	if cfg.APIKey == "" {
 		fmt.Println("Missing API key. Set MODEL_API_KEY, e.g.:")
 		fmt.Println("  export MODEL_API_KEY=your-key")
@@ -144,7 +158,7 @@ func main() {
 	// Sub-agent delegate: a smaller autonomous turn with the same model.
 	runner.delegate = func(task string) string {
 		sub := []Message{
-			{Role: "system", Content: systemPrompt(cfg.UserName, loadMemory(cfg.MemoryPath), cfg.BaseURL, cfg.Model)},
+			{Role: "system", Content: systemPrompt(cfg.UserName, memoryContextFor("", cfg.MemoryPath), cfg.BaseURL, cfg.Model)},
 			{Role: "user", Content: "Sub-task (work it, verify it, return a short summary): " + task},
 		}
 		// Limit sub-agent to 10 tool steps by reusing runTurnDetailed with a cap via messages — it stops at 20, acceptable for a sub-task.
@@ -152,7 +166,7 @@ func main() {
 		return "Sub-agent used " + strings.Join(used, ", ") + ". Result: " + reply
 	}
 
-	memory := loadMemory(cfg.MemoryPath)
+	memory := memoryContextFor("", cfg.MemoryPath)
 	system := systemPrompt(cfg.UserName, memory, cfg.BaseURL, cfg.Model)
 
 	mode := "generic"
@@ -205,6 +219,51 @@ func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	runREPL(&cfg, client, runner, tools, &messages, scanner)
+}
+
+// loadChatInto loads a DB chat's last 100 messages into *messages,
+// with the system prompt first. Returns the chat id used.
+func loadChatInto(chatID string, messages *[]Message, system string) string {
+	if appDB == nil {
+		*messages = []Message{{Role: "system", Content: system}}
+		return ""
+	}
+	if chatID == "" {
+		if c, err := appDB.DefaultChat(); err == nil {
+			chatID = c.ID
+		}
+	}
+	loaded, err := appDB.LoadMessages(chatID, 100)
+	if err != nil {
+		loaded = nil
+	}
+	*messages = []Message{{Role: "system", Content: system}}
+	*messages = append(*messages, loaded...)
+	return chatID
+}
+
+// persistTurn saves the messages added during one turn to the chat.
+func persistTurn(chatID string, beforeLen int, after []Message) {
+	if appDB == nil || chatID == "" || len(after) <= beforeLen {
+		return
+	}
+	for _, m := range after[beforeLen:] {
+		if m.Role == "system" {
+			continue
+		}
+		_ = appDB.AddMessage(chatID, m)
+	}
+}
+
+// refreshSystemFor injects the memories relevant to this user message
+// into the system prompt, so each turn sees the right memories
+// instead of only the ones from startup.
+func refreshSystemFor(cfg *Config, messages *[]Message, input string) {
+	if len(*messages) == 0 || (*messages)[0].Role != "system" {
+		return
+	}
+	ctx := memoryContextFor(input, cfg.MemoryPath)
+	(*messages)[0].Content = systemPrompt(cfg.UserName, ctx, cfg.BaseURL, cfg.Model)
 }
 
 // runTurn sends one user message and loops through tool calls
