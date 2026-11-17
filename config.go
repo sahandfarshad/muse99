@@ -36,6 +36,7 @@ type FileConfig struct {
 	KeyFile        string              `json:"key_file,omitempty"`
 	ActiveProvider string              `json:"active_provider,omitempty"`
 	Providers      map[string]Provider `json:"providers,omitempty"`
+	AllowShell     bool                `json:"allow_shell,omitempty"`
 }
 
 // Provider presets. All are OpenAI-compatible /chat/completions endpoints,
@@ -205,6 +206,7 @@ func configFromRuntime(cfg Config) FileConfig {
 	fc.CertFile = cfg.CertFile
 	fc.KeyFile = cfg.KeyFile
 	fc.ActiveProvider = cfg.Provider
+	fc.AllowShell = cfg.AllowShell
 	if len(cfg.Providers) > 0 {
 		fc.Providers = cfg.Providers
 	}
@@ -243,6 +245,7 @@ func applyFileConfig(cfg *Config, fc FileConfig) {
 	cfg.TLSEnabled = fc.TLSEnabled
 	cfg.CertFile = fc.CertFile
 	cfg.KeyFile = fc.KeyFile
+	cfg.AllowShell = fc.AllowShell
 }
 
 // findCerts returns the cert/key pair to use for a domain, if any exist.
