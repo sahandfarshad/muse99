@@ -496,14 +496,94 @@ func (s *webServer) handleModelTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "need JSON body", http.StatusBadRequest)
 		return
 	}
-	base, key, _ := resolveModelTarget(&s.cfg, body.Provider, body.BaseURL, body.APIKey)
-	reply, latency, err := testModel(base, key, strings.TrimSpace(body.Model))
+	body.Model = normalizeModelID(body.Model)
+	base, key, name := resolveModelTarget(&s.cfg, body.Provider, body.BaseURL, body.APIKey)
+	reply, latency, err := testModel(base, key, body.Model, name)
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "model": body.Model, "latency_ms": latency, "error": err.Error()})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "model": body.Model, "latency_ms": latency, "reply": reply})
+}
+
+// handleModelActive serves POST /api/models/active: make a model the
+// active model for a provider. Body: {provider|base_url, api_key,
+// model}. The model id is normalised (a "models/..." prefix from
+// Gemini's native list is stripped) before it is saved, and the live
+// client is rebuilt so /api/status shows the new model at once.
+func (s *webServer) handleModelActive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		BaseURL  string `json:"base_url"`
+		APIKey   string `json:"api_key"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "need JSON body", http.StatusBadRequest)
+		return
+	}
+	model := normalizeModelID(body.Model)
+	if model == "" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no model given"})
+		return
+	}
+	name := strings.TrimSpace(body.Provider)
+	if name == "" {
+		name = s.cfg.Provider
+	}
+	// Save the model for this provider (keeping its existing key and
+	// base URL when the request does not send new ones), then make
+	// it the live model. Start from the LIVE provider entry, not
+	// just the disk one: a custom provider (or one set up via env)
+	// may not be in config.json yet, and starting from disk would
+	// wipe its base URL and key.
+	fc := loadFileConfig()
+	p := Provider{Name: name}
+	if live, ok := s.cfg.Providers[name]; ok {
+		p = live
+	}
+	if saved, ok := fc.Providers[name]; ok {
+		if p.BaseURL == "" {
+			p.BaseURL = saved.BaseURL
+		}
+		if p.APIKey == "" {
+			p.APIKey = saved.APIKey
+		}
+	}
+	if body.BaseURL != "" {
+		p.BaseURL = body.BaseURL
+	}
+	if p.BaseURL == "" {
+		if preset, ok := providerPreset(name); ok {
+			p.BaseURL = preset.BaseURL
+		}
+	}
+	if body.APIKey != "" {
+		p.APIKey = body.APIKey
+	}
+	p.Name = name
+	p.Model = model
+	fc.setProvider(p)
+	fc.ActiveProvider = name
+	_ = saveFileConfig(fc)
+	active := fc.activeProvider()
+	s.cfg.Provider = active.Name
+	s.cfg.BaseURL = active.BaseURL
+	s.cfg.Model = active.Model
+	s.cfg.APIKey = active.APIKey
+	if s.cfg.Providers == nil {
+		s.cfg.Providers = map[string]Provider{}
+	}
+	s.cfg.Providers[name] = active
+	*s.client = *NewClient(s.cfg.BaseURL, s.cfg.APIKey, s.cfg.Model)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "model": model, "provider": name})
 }
 
 // handleMemories lists / adds / edits / deletes individual memories.
@@ -617,7 +697,7 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 // noAPIKeyNotice is what chat returns (and the UI shows) when no
 // provider API key has been set yet. It points at Settings, where
 // the key is added — there is no terminal setup step any more.
-const noAPIKeyNotice = "No API key set yet — I can't chat until you add one.\n\nOpen Settings → Provider & model (the Settings tab above), pick your provider, paste your API key, press Fetch models, choose a model, and press Save. Then come back here and chat."
+const noAPIKeyNotice = "No API key set yet — I can't chat until you add one.\n\nOpen Settings → Provider & model (the Settings tab above), pick your provider, paste your API key, press Fetch models, click a model to test it, then press Set active. Then come back here and chat."
 
 func (s *webServer) handleTask(w http.ResponseWriter, r *http.Request) {
 	// POST /api/task {goal} starts an autonomous task in the background.
@@ -713,8 +793,32 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if body.Port != nil {
 			fc.Port = *body.Port
 		}
+		// v6: a blank key field means "keep the key in use", not
+		// "clear it". The key in use may come from env vars (folded
+		// into the live config at startup, never written to
+		// config.json) — saving Settings used to wipe it, which broke
+		// providers set up that way. Keep the live key, and persist
+		// it so it survives a restart.
+		target := fc.ActiveProvider
+		if target == "" {
+			target = s.cfg.Provider
+		}
+		if fc.APIKey == "" {
+			if p, ok := s.cfg.Providers[target]; ok && p.APIKey != "" {
+				fc.APIKey = p.APIKey
+			}
+		}
+		fc.Model = normalizeModelID(fc.Model)
 		// Only update fields the user sent; keep the existing API key if blank.
 		old := loadFileConfig()
+		// Merge the live providers in: a custom provider (or one set
+		// up via env) may not be in config.json yet, and saving
+		// Settings must not wipe its base URL or key.
+		for name, p := range s.cfg.Providers {
+			if _, ok := old.Providers[name]; !ok {
+				old.Providers[name] = p
+			}
+		}
 		if fc.ActiveProvider != "" {
 			// Switching provider: save any base/model/key sent with it,
 			// then activate it so the live client uses the right key.
@@ -775,19 +879,37 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	fc := loadFileConfig()
-	masked := maskKey(fc.APIKey)
+	// v6: say where the key in use actually comes from. A key set via
+	// env vars is folded into the live config at startup but is NOT
+	// in config.json — Settings used to show "(not set)" for it, and
+	// saving Settings wiped it. "saved" = in config.json, "env" =
+	// from the environment / command line (press Save to keep it in
+	// config.json), "none" = no key.
+	keySource := func(name string) (masked, source string) {
+		if k := fc.Providers[name].APIKey; k != "" {
+			return maskKey(k), "saved"
+		}
+		if p, ok := s.cfg.Providers[name]; ok && p.APIKey != "" {
+			return maskKey(p.APIKey), "env"
+		}
+		return "(not set)", "none"
+	}
+	active := fc.ActiveProvider
+	activeMasked, activeSource := keySource(active)
 	providers := []map[string]string{}
 	for _, name := range providerPresetNames() {
 		p := fc.Providers[name]
-		key := maskKey(p.APIKey)
+		masked, source := keySource(name)
 		providers = append(providers, map[string]string{
-			"name": name, "base_url": p.BaseURL, "model": p.Model, "api_key_masked": key,
+			"name": name, "base_url": p.BaseURL, "model": p.Model,
+			"api_key_masked": masked, "api_key_source": source,
 		})
 	}
 	resp := map[string]any{
 		"base_url": fc.BaseURL, "model": fc.Model, "user_name": fc.UserName,
-		"api_key_masked": masked, "config_path": configPath(),
-		"provider": fc.ActiveProvider, "providers": providers,
+		"api_key_masked": activeMasked, "api_key_source": activeSource,
+		"config_path": configPath(),
+		"provider":    fc.ActiveProvider, "providers": providers,
 		"port": fc.Port, "domain": fc.Domain, "tls_enabled": fc.TLSEnabled,
 		"allow_shell": fc.AllowShell, "usage": usageTotalsJSON(),
 	}
@@ -822,6 +944,7 @@ func buildMux(s *webServer) *http.ServeMux {
 	mux.HandleFunc("/api/models", s.handleModels)
 	mux.HandleFunc("/api/models/refresh", s.handleModels)
 	mux.HandleFunc("/api/models/test", s.handleModelTest)
+	mux.HandleFunc("/api/models/active", s.handleModelActive)
 	return mux
 }
 
@@ -902,6 +1025,16 @@ h3.sec{font-size:17px;margin:6px 0 14px;letter-spacing:-.01em}
 .modelrow{display:flex;gap:8px;align-items:flex-start}
 .modelrow input{flex:1}
 .modelrow .btn{flex-shrink:0;margin-top:1px}
+.modelitem{display:flex;gap:10px;align-items:center;padding:11px 13px;border:1px solid var(--line);border-radius:12px;margin-bottom:8px;cursor:pointer;background:var(--surface)}
+.modelitem:hover{border-color:var(--ink)}
+.modelitem.active{border-color:var(--accent);background:var(--accent-soft)}
+.modelitem .mid{flex:1;min-width:0}
+.modelitem .mid b{font-size:14px;word-break:break-all}
+.modelitem .mid .sub{font-size:12.5px;color:var(--muted)}
+.modelitem .res{font-size:12.5px;white-space:nowrap}
+.modelitem .res.ok{color:var(--ok)}
+.modelitem .res.bad{color:var(--bad)}
+.modelitem .btn{padding:6px 12px;font-size:12.5px;flex-shrink:0}
 .status{font-size:13px;margin-top:9px;min-height:19px;color:var(--ink2)}
 .status.ok{color:var(--ok)}
 .status.bad{color:var(--bad)}
@@ -920,15 +1053,19 @@ h3.sec{font-size:17px;margin:6px 0 14px;letter-spacing:-.01em}
 <div id="pane-memory" class="pane"><h3 class="sec">Memory</h3><p class="note">Facts Muse99 remembers about you, with kind and source. They are used in every chat. Delete one here to forget it.</p><div id="memlist"></div><button class="btn" onclick="summariseChat()">Summarise current chat into memory</button><h3 class="sec" style="margin-top:24px">Memory file</h3><textarea id="mem" rows="12"></textarea><br><br><button class="btn primary" onclick="saveMemory()">Save memory file</button></div>
 <div id="pane-servers" class="pane"><h3 class="sec">Servers</h3><p class="note">Give Muse99 access only if you want it to. Remote commands use your system ssh key.</p><div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="srv-name" placeholder="Name" style="flex:1;min-width:120px"><input id="srv-user" placeholder="user" style="flex:1;min-width:120px"><input id="srv-host" placeholder="host / IP" style="flex:1;min-width:140px"><input id="srv-port" placeholder="22" style="width:80px"></div><br><button class="btn primary" onclick="addServer()">Add server</button></div><div id="srvlist" style="margin-top:14px"></div></div>
 <div id="pane-settings" class="pane"><h3 class="sec">Settings</h3>
-<div class="card"><h3>Provider &amp; model</h3><p class="sub">Pick a provider, fetch its models, choose one — no typing model names by hand.</p>
+<div class="card"><h3>Provider &amp; model</h3><p class="sub">Enter a provider and its API key, fetch its models, then click a model to test it and set it active — no typing model names.</p>
 <label>Provider</label><select id="set-provider"></select>
 <label>API base URL</label><input id="set-base" placeholder="API base URL">
 <label>API key <span class="hint">— leave blank to keep the saved one</span></label><input id="set-key" placeholder="API key" type="password">
-<label>Model</label>
-<div class="modelrow"><input id="set-model" list="model-datalist" placeholder="Fetch models, then pick one…" autocomplete="off"><datalist id="model-datalist"></datalist><button class="btn" id="fetch-models-btn" onclick="fetchModels()">Fetch models</button><button class="btn" id="test-model-btn" onclick="testModel()">Test</button></div>
-<input id="model-filter" placeholder="Filter the model list…" oninput="filterModels()" style="margin-top:8px">
+<div class="status" id="key-source" style="margin-top:6px"></div>
+<div class="kv" style="margin-top:10px">Active model: <b id="active-model">…</b></div>
+<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" id="fetch-models-btn" onclick="fetchModels()">Fetch models</button><button class="btn" id="test-all-btn" onclick="testAllModels()" disabled>Test all</button><button class="btn ghost" id="test-all-cancel" onclick="cancelTestAll()" style="display:none">Cancel</button></div>
+<input id="model-filter" placeholder="Filter the model list…" oninput="renderModelList()" style="margin-top:10px">
+<div id="model-list" style="margin-top:10px"></div>
 <div class="status" id="model-status"></div>
-<p class="note">Fetching asks the provider's <span style="font-family:monospace">/v1/models</span> endpoint with your key — the key is never shown or logged. <b>Test</b> sends one tiny message ("Reply with the single word OK") to the chosen model and shows whether it answers and how fast. If a provider blocks its model list (Gemini's OpenAI-compatible endpoint often does), you still see suggested models — or just type any model name in the box above.</p>
+<p class="note"><a href="#" onclick="showManualModel(event)">Fetch didn't return any models? Enter one manually</a></p>
+<div id="manual-model-box" style="display:none;margin-top:8px"><div class="modelrow"><input id="manual-model" placeholder="e.g. gemini-2.5-flash" autocomplete="off"><button class="btn" onclick="saveManualModel()">Use this model</button></div></div>
+<p class="note">Fetching asks the provider's <span style="font-family:monospace">/v1/models</span> endpoint with your key — the key is never shown or logged. Click a model (or its <b>Test</b> button) to send one tiny message ("Reply with the single word OK") and see whether it answers and how fast. <b>Set active</b> makes that model the one Muse99 chats with. <b>Test all</b> tests the first 20 models one by one. For Gemini, if the list endpoint is empty or refuses the key, Muse99 also tries Gemini's native model list — and strips the "models/" prefix, so the model it saves always works for chat.</p>
 </div>
 <div class="card"><h3>Web &amp; access</h3>
 <label>Your name</label><input id="set-user" placeholder="Your name">
@@ -976,15 +1113,30 @@ async function loadMemory(){const r=await fetch('/api/memory');const j=await r.j
 async function saveMemory(){await fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({memory:document.getElementById('mem').value})});alert('Saved');}
 async function loadServers(){const r=await fetch('/api/servers');const j=await r.json();document.getElementById('srvlist').innerHTML=j.map(s=>'<div class="card">'+s.name+' — '+s.user+'@'+s.host+':'+s.port+'</div>').join('')||'<div class="empty">(no servers — Muse99 only uses servers you add here)</div>';}
 async function addServer(){const b={name:document.getElementById('srv-name').value,user:document.getElementById('srv-user').value,host:document.getElementById('srv-host').value,port:parseInt(document.getElementById('srv-port').value||'22')};await fetch('/api/servers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});loadServers();}
-// --- model discovery (v4) ---
+// --- model discovery (v6): clickable list, click-to-test, set active ---
+// No model text input any more: Fetch models, click a model to test
+// it, press Set active. The only typing is the hidden manual fallback.
+let allModels=[];
+let modelResults={}; // id -> {ok, latency_ms, reply, error, testing}
+let activeModel='';
+let testAllRunning=false;
+let testAllCancel=false;
+const TEST_ALL_LIMIT=20;
 function modelStatus(msg,cls){const el=document.getElementById('model-status');el.textContent=msg;el.className='status'+(cls?' '+cls:'');}
-function fillModelList(models,source,fetchedAt){allModels=models||[];const dl=document.getElementById('model-datalist');dl.innerHTML=allModels.map(m=>'<option value="'+escapeHtml(m.id)+'">').join('');if(source){const when=fetchedAt?new Date(fetchedAt).toLocaleString():'';modelStatus(allModels.length+' model'+(allModels.length===1?'':'s')+' · '+(source==='live'?'live from provider':source==='suggested'?'suggested models (provider list was empty)':'cached'+(when?' · last fetched '+when:''))+(source==='cached'?' — press Fetch models to refresh':''),'');}}
-function filterModels(){const q=document.getElementById('model-filter').value.trim().toLowerCase();const dl=document.getElementById('model-datalist');const shown=allModels.filter(m=>!q||m.id.toLowerCase().includes(q));dl.innerHTML=shown.map(m=>'<option value="'+escapeHtml(m.id)+'">').join('');if(q)modelStatus(shown.length+' of '+allModels.length+' models match "'+q+'"','');}
+function providerFields(){return {provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value};}
+function fillModelList(models,source,fetchedAt){allModels=(models||[]).map(m=>({id:m.id,owned_by:m.owned_by||''}));modelResults={};renderModelList();document.getElementById('test-all-btn').disabled=!allModels.length;if(source){const when=fetchedAt?new Date(fetchedAt).toLocaleString():'';modelStatus(allModels.length+' model'+(allModels.length===1?'':'s')+' · '+(source==='live'?'live from provider':source==='suggested'?'suggested models (provider list was empty)':'cached'+(when?' · last fetched '+when:''))+(source==='cached'?' — press Fetch models to refresh':''),'');}}
+function renderModelList(){const q=document.getElementById('model-filter').value.trim().toLowerCase();const shown=allModels.filter(m=>!q||m.id.toLowerCase().includes(q)||(m.owned_by||'').toLowerCase().includes(q));const list=document.getElementById('model-list');if(!shown.length){list.innerHTML='<div class="empty">'+(allModels.length?'No models match "'+escapeHtml(q)+'".':'No models yet — press Fetch models.')+'</div>';return;}list.innerHTML=shown.map(m=>{const r=modelResults[m.id]||{};const isActive=m.id===activeModel;let res='';if(r.testing)res='<span class="res">Testing…</span>';else if(r.ok)res='<span class="res ok">✓ '+r.latency_ms+' ms · "'+escapeHtml(r.reply||'')+'"</span>';else if(r.error)res='<span class="res bad">✗ '+escapeHtml(r.error)+'</span>';return '<div class="modelitem'+(isActive?' active':'')+'" data-id="'+escapeHtml(m.id)+'"><div class="mid"><b>'+escapeHtml(m.id)+'</b>'+(isActive?' <span class="tag">ACTIVE</span>':'')+'<div class="sub">'+escapeHtml(m.owned_by||'')+'</div></div>'+res+'<button class="btn" data-act="test" data-id="'+escapeHtml(m.id)+'">Test</button><button class="btn primary" data-act="active" data-id="'+escapeHtml(m.id)+'">Set active</button></div>';}).join('');if(q)modelStatus(shown.length+' of '+allModels.length+' models match "'+q+'"','');}
+document.getElementById('model-list').addEventListener('click',e=>{const btn=e.target.closest('[data-act]');const row=e.target.closest('.modelitem');const id=btn?btn.dataset.id:(row?row.dataset.id:null);if(!id)return;if(btn&&btn.dataset.act==='active'){setActiveModel(id);return;}testOneModel(id);});
 async function refreshModelList(){const p=document.getElementById('set-provider').value;try{const r=await fetch('/api/models?provider='+encodeURIComponent(p));const j=await r.json();if(j.error){modelStatus(j.error,'bad');if(j.models&&j.models.length)fillModelList(j.models,'cached','');return;}fillModelList(j.models,j.source,j.fetched_at);}catch(e){modelStatus('Could not load models: '+e,'bad');}}
-async function fetchModels(){const btn=document.getElementById('fetch-models-btn');btn.disabled=true;modelStatus('Fetching models from provider…','');try{const b={provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value};const r=await fetch('/api/models/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error){modelStatus(j.error,'bad');}else{fillModelList(j.models,j.source,j.fetched_at);if(!j.models||!j.models.length)modelStatus('Provider returned no models — type a model name by hand, or try another provider.','bad');}}catch(e){modelStatus('Fetch failed: '+e,'bad');}btn.disabled=false;}
-async function testModel(){const m=document.getElementById('set-model').value.trim();if(!m){modelStatus('Pick or type a model first.','bad');return;}const btn=document.getElementById('test-model-btn');btn.disabled=true;modelStatus('Testing '+m+'…','');try{const b={provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value,model:m};const r=await fetch('/api/models/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok){modelStatus('✓ '+j.model+' works — replied "'+j.reply+'" in '+j.latency_ms+' ms.','ok');}else{modelStatus('✗ '+j.model+' failed: '+(j.error||'unknown error'),'bad');}}catch(e){modelStatus('Test failed: '+e,'bad');}btn.disabled=false;}
+async function fetchModels(){const btn=document.getElementById('fetch-models-btn');btn.disabled=true;modelStatus('Fetching models from provider…','');try{const b=providerFields();const r=await fetch('/api/models/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error){modelStatus(j.error,'bad');}else{fillModelList(j.models,j.source,j.fetched_at);if(!j.models||!j.models.length)modelStatus('Provider returned no models — use "Enter one manually" below, or try another provider.','bad');}}catch(e){modelStatus('Fetch failed: '+e,'bad');}btn.disabled=false;}
+async function testOneModel(id){if(modelResults[id]&&modelResults[id].testing)return;modelResults[id]={testing:true};renderModelList();try{const b=Object.assign(providerFields(),{model:id});const r=await fetch('/api/models/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok){modelResults[id]={ok:true,latency_ms:j.latency_ms,reply:j.reply};}else{modelResults[id]={ok:false,error:j.error||'failed'};}}catch(e){modelResults[id]={ok:false,error:String(e)};}renderModelList();}
+async function setActiveModel(id){try{const b=Object.assign(providerFields(),{model:id});const r=await fetch('/api/models/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok){activeModel=j.model;document.getElementById('active-model').textContent=j.model;modelStatus('✓ '+j.model+' is now the active model for '+j.provider+'.','ok');renderModelList();loadStatus();}else{modelStatus('Could not set active model: '+(j.error||'unknown error'),'bad');}}catch(e){modelStatus('Set active failed: '+e,'bad');}}
+async function testAllModels(){if(testAllRunning)return;const list=allModels.slice(0,TEST_ALL_LIMIT);if(!list.length){modelStatus('Fetch models first.','bad');return;}testAllRunning=true;testAllCancel=false;document.getElementById('test-all-btn').disabled=true;document.getElementById('test-all-cancel').style.display='';let done=0,ok=0;for(const m of list){if(testAllCancel)break;await testOneModel(m.id);done++;if(modelResults[m.id]&&modelResults[m.id].ok)ok++;await new Promise(r=>setTimeout(r,150));}testAllRunning=false;document.getElementById('test-all-btn').disabled=false;document.getElementById('test-all-cancel').style.display='none';modelStatus('Tested '+done+' model'+(done===1?'':'s')+' (first '+TEST_ALL_LIMIT+') — '+ok+' work'+(testAllCancel?' (cancelled)':''),ok?'ok':'');}
+function cancelTestAll(){testAllCancel=true;}
+function showManualModel(e){e.preventDefault();document.getElementById('manual-model-box').style.display='block';document.getElementById('manual-model').focus();}
+async function saveManualModel(){const m=document.getElementById('manual-model').value.trim().replace(/^models\//,'');if(!m){modelStatus('Type a model name first.','bad');return;}await setActiveModel(m);document.getElementById('manual-model-box').style.display='none';}
 let settingsData=null;
-async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+'<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';document.getElementById('set-base').value=j.base_url||'';document.getElementById('set-model').value=j.model||'';document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||3759;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';document.getElementById('set-model').value=p.model||'';}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}refreshModelList();}
-async function saveSettings(){const b={active_provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,model:document.getElementById('set-model').value,api_key:document.getElementById('set-key').value,user_name:document.getElementById('set-user').value,port:parseInt(document.getElementById('set-port').value||'3759'),domain:document.getElementById('set-domain').value,tls_enabled:document.getElementById('set-tls').checked,allow_shell:document.getElementById('set-shell').checked};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});alert('Saved — restart the web UI from the SSH menu if you changed the port or SSL.');loadSettings();loadStatus();}
+async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+' ('+(j.api_key_source||'none')+')<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';document.getElementById('set-base').value=j.base_url||'';activeModel=j.model||'';document.getElementById('active-model').textContent=j.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(j.api_key_masked||'(not set)')+(j.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':j.api_key_source==='saved'?' — saved in config.json':'');document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||3759;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';activeModel=p.model||'';document.getElementById('active-model').textContent=p.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(p.api_key_masked||'(not set)')+(p.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':p.api_key_source==='saved'?' — saved in config.json':'');}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}refreshModelList();}
+async function saveSettings(){const b={active_provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value,user_name:document.getElementById('set-user').value,port:parseInt(document.getElementById('set-port').value||'3759'),domain:document.getElementById('set-domain').value,tls_enabled:document.getElementById('set-tls').checked,allow_shell:document.getElementById('set-shell').checked};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});alert('Saved — restart the web UI from the SSH menu if you changed the port or SSL.');loadSettings();loadStatus();}
 </script></body></html>
 `
