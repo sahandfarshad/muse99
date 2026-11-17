@@ -38,6 +38,10 @@ type Config struct {
 	Menu       bool
 	Task       string
 	Schedule   bool
+	// v5: uninstall. --uninstall removes the binary + service files
+	// (data only with --yes). `muse99 uninstall` is the same thing.
+	Uninstall    bool
+	UninstallYes bool
 }
 
 // switchProvider activates a provider by name, updating BaseURL/Model/APIKey
@@ -73,12 +77,18 @@ func loadConfig() Config {
 	flag.StringVar(&cfg.Workdir, "workdir", envOr("MUSE_WORKDIR", mustCwd()), "Working directory for file/shell tools")
 	flag.StringVar(&cfg.Prompt, "prompt", "", "Single prompt, then exit (non-interactive)")
 	flag.BoolVar(&cfg.Web, "web", false, "Start web UI instead of terminal chat")
-	flag.IntVar(&cfg.WebPort, "port", 8080, "Web UI port (with --web)")
+	flag.IntVar(&cfg.WebPort, "port", DefaultWebPort, "Web UI port (with --web)")
 	flag.StringVar(&cfg.WebAddr, "addr", "0.0.0.0", "Web UI address (with --web)")
 	flag.BoolVar(&cfg.Menu, "menu", true, "Show SSH menu on top (web address + options). Use --menu=false for plain terminal chat.")
 	flag.StringVar(&cfg.Task, "task", "", "Autonomous task: work till DONE, up to 100 steps")
 	flag.BoolVar(&cfg.Schedule, "schedule", false, "Run scheduler (scheduled.json, every minute)")
+	flag.BoolVar(&cfg.Uninstall, "uninstall", false, "Uninstall Muse99 (binary + service files; data only with --yes)")
+	flag.BoolVar(&cfg.UninstallYes, "yes", false, "With --uninstall: skip prompts and remove ~/.muse99 data too")
 	flag.Parse()
+	// Positional subcommand: `muse99 uninstall [--yes]`.
+	if !cfg.Uninstall && flag.NArg() > 0 && flag.Arg(0) == "uninstall" {
+		cfg.Uninstall = true
+	}
 	// Config file + .env fill gaps left by env/flags.
 	loadDotEnv(cfg.Workdir)
 	fc := loadFileConfig()
@@ -111,7 +121,8 @@ func loadConfig() Config {
 		cfg.MemoryPath = defaultMemoryPath(cfg.Workdir)
 	}
 	// Also honour a positional prompt: ./muse "do X"
-	if cfg.Prompt == "" && flag.NArg() > 0 {
+	// (but not the `uninstall` subcommand — that is handled above.)
+	if cfg.Prompt == "" && flag.NArg() > 0 && flag.Arg(0) != "uninstall" {
 		cfg.Prompt = strings.Join(flag.Args(), " ")
 	}
 	return cfg
@@ -134,6 +145,14 @@ func mustCwd() string {
 
 func main() {
 	cfg := loadConfig()
+	// Uninstall runs before anything else — no API key, no DB needed.
+	if cfg.Uninstall {
+		if err := runUninstallCLI(cfg.UninstallYes); err != nil {
+			fmt.Println("Uninstall failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	// Open the embedded database (chats, memories, usage). If it
 	// cannot open, keep going with the old file-only behaviour so a
 	// DB problem never stops the agent from starting.
@@ -142,13 +161,19 @@ func main() {
 	} else {
 		defer db.Close()
 	}
-	if cfg.APIKey == "" {
-		fmt.Println("Missing API key. Set MODEL_API_KEY, e.g.:")
-		fmt.Println("  export MODEL_API_KEY=your-key")
-		fmt.Println("  export MODEL_API_BASE_URL=https://api.meta.ai/v1")
-		fmt.Println("  export MODEL_ID=muse-spark-1.3")
-		fmt.Println("Or for any other provider, change MODEL_API_BASE_URL / MODEL_ID.")
+	// v5: the API key is set inside the web UI (Settings → Provider &
+	// model), not on the command line. So the menu / web UI may start
+	// with no key at all — chat just shows a friendly notice until
+	// the key is added. Only non-interactive modes still need a key.
+	if cfg.APIKey == "" && !cfg.Menu && !cfg.Web {
+		fmt.Println("No API key set yet.")
+		fmt.Println("Start the web UI and add it in Settings → Provider & model:")
+		fmt.Println("  muse99            # SSH menu — web UI link is on top")
+		fmt.Println("Or set it for this run only: MODEL_API_KEY=your-key muse99 --menu=false")
 		os.Exit(1)
+	}
+	if cfg.APIKey == "" {
+		fmt.Println("No API key yet — open the web UI and add one in Settings → Provider & model.")
 	}
 
 	client := NewClient(cfg.BaseURL, cfg.APIKey, cfg.Model)
