@@ -117,7 +117,7 @@ func OpenDB(path string) (*DB, error) {
 	}
 	d := &DB{bolt: bolt, path: path}
 	err = bolt.Update(func(tx *bbolt.Tx) error {
-		for _, b := range [][]byte{bucketChats, bucketMessages, bucketMemories, bucketMeta} {
+		for _, b := range [][]byte{bucketChats, bucketMessages, bucketMemories, bucketMeta, bucketModelLists} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
