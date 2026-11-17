@@ -377,6 +377,80 @@ func (s *webServer) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
+// ---------- v4: model discovery ----------
+
+// modelListResp is the JSON shape of /api/models.
+type modelListResp struct {
+	Models    []ModelInfo `json:"models"`
+	Source    string      `json:"source"` // "live" | "cached" | "suggested"
+	FetchedAt string      `json:"fetched_at,omitempty"`
+	Provider  string      `json:"provider,omitempty"`
+	Error     string      `json:"error,omitempty"`
+}
+
+// handleModels serves GET /api/models (list models for a provider)
+// and POST /api/models/refresh (force a fresh fetch). Query/body:
+// provider (saved name), or base_url + api_key for an unsaved custom
+// provider. The API key is never returned in the response.
+func (s *webServer) handleModels(w http.ResponseWriter, r *http.Request) {
+	force := r.Method == http.MethodPost
+	var provider, baseURL, apiKey string
+	if r.Method == http.MethodPost {
+		var body struct {
+			Provider string `json:"provider"`
+			BaseURL  string `json:"base_url"`
+			APIKey   string `json:"api_key"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		provider, baseURL, apiKey = body.Provider, body.BaseURL, body.APIKey
+	} else if r.Method == http.MethodGet {
+		q := r.URL.Query()
+		provider, baseURL, apiKey = q.Get("provider"), q.Get("base_url"), q.Get("api_key")
+		force = q.Get("refresh") == "1"
+	} else {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	base, key, name := resolveModelTarget(&s.cfg, provider, baseURL, apiKey)
+	list, err := getModels(base, key, name, force)
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		// Still answer 200 with an error field (and any cached list
+		// the fallback found) so the UI can show it inline.
+		_ = json.NewEncoder(w).Encode(modelListResp{Models: []ModelInfo{}, Source: "cached", Provider: name, Error: err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(modelListResp{Models: list.Models, Source: list.Source, FetchedAt: list.FetchedAt.Format(time.RFC3339), Provider: name})
+}
+
+// handleModelTest serves POST /api/models/test: send one tiny chat
+// completion to a model and report whether it answers. Body:
+// {provider|base_url, api_key, model}. The key is never echoed back.
+func (s *webServer) handleModelTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		BaseURL  string `json:"base_url"`
+		APIKey   string `json:"api_key"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "need JSON body", http.StatusBadRequest)
+		return
+	}
+	base, key, _ := resolveModelTarget(&s.cfg, body.Provider, body.BaseURL, body.APIKey)
+	reply, latency, err := testModel(base, key, strings.TrimSpace(body.Model))
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "model": body.Model, "latency_ms": latency, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "model": body.Model, "latency_ms": latency, "reply": reply})
+}
+
 // handleMemories lists / adds / edits / deletes individual memories.
 func (s *webServer) handleMemories(w http.ResponseWriter, r *http.Request) {
 	if s.db == nil {
@@ -642,13 +716,23 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"name": name, "base_url": p.BaseURL, "model": p.Model, "api_key_masked": key,
 		})
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"base_url": fc.BaseURL, "model": fc.Model, "user_name": fc.UserName,
 		"api_key_masked": masked, "config_path": configPath(),
 		"provider": fc.ActiveProvider, "providers": providers,
 		"port": fc.Port, "domain": fc.Domain, "tls_enabled": fc.TLSEnabled,
 		"allow_shell": fc.AllowShell, "usage": usageTotalsJSON(),
-	})
+	}
+	// Last-known model list for the active provider (from the DB
+	// cache only — loading Settings never makes a network call).
+	if appDB != nil {
+		if saved, ok := appDB.LoadModelList(fc.BaseURL); ok {
+			resp["models"] = saved.Models
+			resp["models_source"] = saved.Source
+			resp["models_fetched_at"] = saved.FetchedAt.Format(time.RFC3339)
+		}
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func buildMux(s *webServer) *http.ServeMux {
@@ -667,6 +751,9 @@ func buildMux(s *webServer) *http.ServeMux {
 	mux.HandleFunc("/api/chats/", s.handleChatMessages)
 	mux.HandleFunc("/api/memories", s.handleMemories)
 	mux.HandleFunc("/api/memories/", s.handleMemories)
+	mux.HandleFunc("/api/models", s.handleModels)
+	mux.HandleFunc("/api/models/refresh", s.handleModels)
+	mux.HandleFunc("/api/models/test", s.handleModelTest)
 	return mux
 }
 
@@ -682,47 +769,129 @@ func startWeb(cfg Config, client *Client, runner *toolRunner, tools []ToolDef, s
 }
 
 const webHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Muse99</title>
-<style>*{box-sizing:border-box}html,body{margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#f7f7f5;color:#1a1a1a;font-size:15px;line-height:1.55}header{position:sticky;top:0;background:#fff;border-bottom:1px solid #e5e5e0;z-index:10}header .bar{max-width:860px;margin:0 auto;padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}h1{font-size:17px;margin:0;font-weight:650;letter-spacing:-.01em}.badge{background:#f0f0ec;color:#555550;padding:3px 10px;border-radius:999px;font-size:12px}.badge.spark{background:#eef2ff;color:#3730a3}.muted{color:#8a8a84;font-size:13px}.addr{color:#8a8a84;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}header button{background:none;border:1px solid #e5e5e0;color:#555550;border-radius:999px;padding:6px 12px;cursor:pointer;font-size:13px}nav{max-width:860px;margin:0 auto;padding:0 16px;display:flex;gap:2px;overflow-x:auto}nav button{background:none;border:0;border-bottom:2px solid transparent;color:#6b6b66;padding:10px 12px;cursor:pointer;font-size:14px;white-space:nowrap}nav button.active{color:#1a1a1a;border-bottom-color:#1a1a1a;font-weight:600}main{max-width:860px;margin:0 auto;padding:20px 16px 160px}.pane{display:none}.pane.active{display:block}.msg{padding:11px 14px;border-radius:18px;line-height:1.55;white-space:pre-wrap;max-width:82%;margin-bottom:12px;font-size:15px}.user{margin-left:auto;background:#1a1a1a;color:#fff;border-bottom-right-radius:6px}.muse{background:#fff;border:1px solid #e5e5e0;border-bottom-left-radius:6px}.tools{font-size:12px;color:#8a8a84;margin-top:6px}form{position:fixed;left:0;right:0;bottom:0;background:#f7f7f5;border-top:1px solid #e5e5e0;padding:12px 16px}.row{max-width:860px;margin:0 auto;display:flex;gap:10px}.row input{flex:1;padding:12px 14px;border-radius:999px;border:1px solid #d9d9d3;background:#fff;font-size:15px;outline:none}.row input:focus{border-color:#1a1a1a}.row button{padding:12px 20px;border-radius:999px;border:0;background:#1a1a1a;color:#fff;font-weight:600;cursor:pointer}button.action{padding:10px 18px;border-radius:999px;border:0;background:#1a1a1a;color:#fff;font-weight:600;cursor:pointer}input,textarea,select{padding:10px 12px;border-radius:10px;border:1px solid #d9d9d3;background:#fff;font-size:14px;width:100%}label{display:block;font-size:13px;color:#6b6b66;margin:14px 0 5px}pre{background:#fff;border:1px solid #e5e5e0;padding:14px;border-radius:12px;overflow:auto;white-space:pre-wrap;font-size:13px}.card{background:#fff;border:1px solid #e5e5e0;border-radius:12px;padding:14px;margin-bottom:12px}h3{font-size:16px;margin:4px 0 12px}.note{font-size:13px;color:#8a8a84;margin-top:12px}
-.layout{display:flex;max-width:1120px;margin:0 auto}aside{width:240px;flex-shrink:0;border-right:1px solid #e5e5e0;padding:16px 12px;background:#fff;position:sticky;top:96px;height:calc(100vh - 96px);overflow-y:auto}aside h3{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:#8a8a84}aside input{margin-bottom:10px}.chatitem{display:flex;gap:6px;align-items:center;padding:8px 10px;border-radius:10px;cursor:pointer;font-size:14px}.chatitem:hover{background:#f0f0ec}.chatitem.active{background:#eef2ff;font-weight:600}.chatitem span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chatitem button{background:none;border:0;color:#8a8a84;cursor:pointer;padding:2px 4px;font-size:13px}.shellbox{display:flex;gap:8px;align-items:center;background:#fff;border:1px solid #e5e5e0;border-radius:999px;padding:6px 12px;font-size:13px;color:#555550;cursor:pointer}.shellbox input{width:auto;margin:0}.shellbox.on{border-color:#1a1a1a;color:#1a1a1a;font-weight:600}@media (max-width:760px){.layout{flex-direction:column}aside{width:100%;position:static;height:auto;border-right:0;border-bottom:1px solid #e5e5e0}main{max-width:860px}}</style></head><body>
-<header><div class="bar"><h1>✦ Muse99</h1><span class="badge" id="mode">…</span><span class="muted" id="model"></span><span class="addr" id="addr"></span><span class="muted" id="usage"></span><span style="flex:1"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust."><input type="checkbox" id="shell-toggle" onchange="toggleShell()"> Allow shell</label><button onclick="clearChat()">Clear chat</button></div>
-<nav><button class="active" onclick="tab('chat',this)">Chat</button><button onclick="tab('files',this)">Files</button><button onclick="tab('tasks',this)">Tasks</button><button onclick="tab('memory',this)">Memory</button><button onclick="tab('servers',this)">Servers</button><button onclick="tab('settings',this)">Settings</button></nav></header>
-<div class="layout"><aside id="sidebar"><h3>Chats</h3><input id="chat-search" placeholder="Search chats…" oninput="loadChats()"><button class="action" style="width:100%;margin-bottom:10px" onclick="newChat()">+ New chat</button><div id="chatlist"></div></aside><main>
+<style>
+:root{--bg:#fafaf9;--surface:#ffffff;--ink:#171717;--ink2:#525252;--muted:#a3a3a3;--line:#e7e5e4;--line2:#f0efed;--accent:#4f46e5;--accent-soft:#eef2ff;--accent-ink:#3730a3;--ok:#15803d;--bad:#b91c1c;--radius:16px;--shadow:0 1px 2px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.04);--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:var(--font);background:var(--bg);color:var(--ink);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+header{position:sticky;top:0;background:rgba(255,255,255,.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);z-index:20}
+.topbar{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:700;letter-spacing:-.02em}
+.brand .mark{width:26px;height:26px;border-radius:8px;background:var(--ink);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:14px}
+.pill{display:inline-flex;align-items:center;gap:6px;background:var(--line2);color:var(--ink2);padding:4px 11px;border-radius:999px;font-size:12.5px;font-weight:500;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill.spark{background:var(--accent-soft);color:var(--accent-ink)}
+.pill.model{background:#fff;border:1px solid var(--line);color:var(--ink)}
+.spacer{flex:1}
+.tabs{max-width:1180px;margin:0 auto;padding:0 20px;display:flex;gap:4px;overflow-x:auto}
+.tabs button{background:none;border:0;color:var(--ink2);padding:11px 13px;cursor:pointer;font-size:14px;font-weight:500;white-space:nowrap;border-radius:10px 10px 0 0;border-bottom:2px solid transparent}
+.tabs button:hover{color:var(--ink)}
+.tabs button.active{color:var(--ink);border-bottom-color:var(--ink);font-weight:650}
+.layout{display:flex;max-width:1180px;margin:0 auto;align-items:flex-start}
+aside{width:264px;flex-shrink:0;padding:20px 12px 20px 20px;position:sticky;top:104px;height:calc(100vh - 104px);overflow-y:auto}
+aside h3{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:2px 4px 10px;font-weight:650}
+aside input{margin-bottom:10px}
+main{flex:1;min-width:0;max-width:820px;padding:22px 20px 170px}
+.pane{display:none;animation:fade .18s ease}
+.pane.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.msg{padding:11px 15px;border-radius:18px;line-height:1.6;white-space:pre-wrap;max-width:85%;margin-bottom:12px;font-size:15px;box-shadow:var(--shadow)}
+.user{margin-left:auto;background:var(--ink);color:#fff;border-bottom-right-radius:6px}
+.muse{background:var(--surface);border:1px solid var(--line);border-bottom-left-radius:6px}
+.tools{font-size:12px;color:var(--muted);margin-top:6px}
+.composer{position:fixed;left:0;right:0;bottom:0;background:linear-gradient(transparent,var(--bg) 30%);padding:22px 20px 16px;z-index:10}
+.composer .row{max-width:820px;margin:0 auto;display:flex;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 5px 5px 18px;box-shadow:var(--shadow)}
+.composer input{flex:1;border:0;background:none;padding:10px 0;font-size:15px;outline:none}
+.composer button{padding:10px 20px;border-radius:999px;border:0;background:var(--ink);color:#fff;font-weight:600;cursor:pointer;font-size:14px}
+.composer button:hover{background:#000}
+button{font-family:var(--font)}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 16px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:600;font-size:13.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+.btn.primary:hover{background:#000}
+.btn.ghost{background:none;border:1px solid var(--line);color:var(--ink2);font-weight:500}
+.btn:disabled{opacity:.5;cursor:wait}
+input,textarea,select{padding:10px 13px;border-radius:12px;border:1px solid var(--line);background:var(--surface);font-size:14px;width:100%;font-family:var(--font);color:var(--ink);outline:none}
+input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+label{display:block;font-size:13px;color:var(--ink2);margin:16px 0 6px;font-weight:550}
+label .hint{font-weight:400;color:var(--muted)}
+pre{background:var(--surface);border:1px solid var(--line);padding:15px;border-radius:var(--radius);overflow:auto;white-space:pre-wrap;font-size:13px;box-shadow:var(--shadow)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:14px;box-shadow:var(--shadow)}
+.card h3{margin:0 0 4px;font-size:16px;letter-spacing:-.01em}
+.card p.sub{margin:0 0 6px;color:var(--ink2);font-size:13.5px}
+h3.sec{font-size:17px;margin:6px 0 14px;letter-spacing:-.01em}
+.note{font-size:13px;color:var(--muted);margin-top:10px;line-height:1.5}
+.chatitem{display:flex;gap:6px;align-items:center;padding:9px 11px;border-radius:11px;cursor:pointer;font-size:14px;color:var(--ink2)}
+.chatitem:hover{background:var(--line2);color:var(--ink)}
+.chatitem.active{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.chatitem span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chatitem button{background:none;border:0;color:var(--muted);cursor:pointer;padding:2px 5px;font-size:13px;border-radius:6px}
+.chatitem button:hover{color:var(--ink)}
+.shellbox{display:inline-flex;gap:7px;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 13px;font-size:13px;color:var(--ink2);cursor:pointer;font-weight:500}
+.shellbox input{width:auto;margin:0;accent-color:var(--accent)}
+.shellbox.on{border-color:var(--ink);color:var(--ink);font-weight:600}
+.iconbtn{background:none;border:1px solid var(--line);color:var(--ink2);border-radius:999px;padding:7px 13px;cursor:pointer;font-size:13px;font-weight:500}
+.iconbtn:hover{color:var(--ink);border-color:var(--ink)}
+.modelrow{display:flex;gap:8px;align-items:flex-start}
+.modelrow input{flex:1}
+.modelrow .btn{flex-shrink:0;margin-top:1px}
+.status{font-size:13px;margin-top:9px;min-height:19px;color:var(--ink2)}
+.status.ok{color:var(--ok)}
+.status.bad{color:var(--bad)}
+.kv{font-size:13.5px;color:var(--ink2);line-height:1.9}
+.kv b{color:var(--ink);font-weight:600}
+.tag{display:inline-block;background:var(--accent-soft);color:var(--accent-ink);border-radius:6px;padding:1px 7px;font-size:12px;font-weight:600}
+.empty{color:var(--muted);font-size:14px;padding:8px 2px}
+@media (max-width:820px){.layout{flex-direction:column}aside{width:100%;position:static;height:auto;padding:14px 20px 4px;border-bottom:1px solid var(--line)}main{padding:16px 16px 170px}.msg{max-width:92%}.topbar{padding:10px 14px}.tabs{padding:0 14px}.pill.addr{display:none}}
+</style></head><body>
+<header><div class="topbar"><span class="brand"><span class="mark">✦</span>Muse99</span><span class="pill spark" id="mode">…</span><span class="pill model" id="model"></span><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><span class="spacer"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust."><input type="checkbox" id="shell-toggle" onchange="toggleShell()"> Shell</label><button class="iconbtn" onclick="clearChat()">Clear chat</button></div>
+<nav class="tabs"><button class="active" onclick="tab('chat',this)">Chat</button><button onclick="tab('files',this)">Files</button><button onclick="tab('tasks',this)">Tasks</button><button onclick="tab('memory',this)">Memory</button><button onclick="tab('servers',this)">Servers</button><button onclick="tab('settings',this)">Settings</button></nav></header>
+<div class="layout"><aside id="sidebar"><h3>Chats</h3><input id="chat-search" placeholder="Search chats…" oninput="loadChats()"><button class="btn primary" style="width:100%;justify-content:center;margin-bottom:10px" onclick="newChat()">+ New chat</button><div id="chatlist"></div></aside><main>
 <div id="pane-chat" class="pane active"><div id="chat"></div><div class="muted" id="thinking" style="display:none">Muse99 is working…</div></div>
-<div id="pane-files" class="pane"><h3>Files</h3><div id="filelist"></div><pre id="fileview">Click a file to view it.</pre></div>
-<div id="pane-tasks" class="pane"><h3>Autonomous tasks</h3><div class="row" style="max-width:none;margin-bottom:12px"><input id="taskgoal" placeholder="Build a todo app in ./todo-app with tests…"><button onclick="startTask()">Start task</button></div><div id="tasklist"></div></div>
-<div id="pane-memory" class="pane"><h3>Memory</h3><p class="note">Facts Muse99 remembers about you, with kind and source. They are used in every chat. Delete one here to forget it.</p><div id="memlist"></div><button class="action" onclick="summariseChat()">Summarise current chat into memory</button><h3 style="margin-top:20px">Memory file</h3><textarea id="mem" rows="12"></textarea><br><br><button class="action" onclick="saveMemory()">Save memory file</button></div>
-<div id="pane-servers" class="pane"><h3>Servers — give Muse99 access only if you want it to</h3><div class="row" style="max-width:none;flex-wrap:wrap"><input id="srv-name" placeholder="Name"><input id="srv-user" placeholder="user"><input id="srv-host" placeholder="host / IP"><input id="srv-port" placeholder="22"></div><br><button class="action" onclick="addServer()">Add server</button><div id="srvlist" style="margin-top:14px"></div><p class="note">Remote commands use your system ssh key. No server is used unless you add it and ask for it.</p></div>
-<div id="pane-settings" class="pane"><h3>Settings</h3><div id="settings"></div><div class="card" id="usagebox"><b>Token usage</b><br><span id="usage-detail">Loading…</span></div>
+<div id="pane-files" class="pane"><h3 class="sec">Files</h3><div id="filelist"></div><pre id="fileview">Click a file to view it.</pre></div>
+<div id="pane-tasks" class="pane"><h3 class="sec">Autonomous tasks</h3><div class="card"><div class="modelrow"><input id="taskgoal" placeholder="Build a todo app in ./todo-app with tests…"><button class="btn primary" onclick="startTask()">Start task</button></div><p class="note">Muse99 plans the task, builds it, runs the tests, fixes failures, and only stops when it can say DONE.</p></div><div id="tasklist"></div></div>
+<div id="pane-memory" class="pane"><h3 class="sec">Memory</h3><p class="note">Facts Muse99 remembers about you, with kind and source. They are used in every chat. Delete one here to forget it.</p><div id="memlist"></div><button class="btn" onclick="summariseChat()">Summarise current chat into memory</button><h3 class="sec" style="margin-top:24px">Memory file</h3><textarea id="mem" rows="12"></textarea><br><br><button class="btn primary" onclick="saveMemory()">Save memory file</button></div>
+<div id="pane-servers" class="pane"><h3 class="sec">Servers</h3><p class="note">Give Muse99 access only if you want it to. Remote commands use your system ssh key.</p><div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="srv-name" placeholder="Name" style="flex:1;min-width:120px"><input id="srv-user" placeholder="user" style="flex:1;min-width:120px"><input id="srv-host" placeholder="host / IP" style="flex:1;min-width:140px"><input id="srv-port" placeholder="22" style="width:80px"></div><br><button class="btn primary" onclick="addServer()">Add server</button></div><div id="srvlist" style="margin-top:14px"></div></div>
+<div id="pane-settings" class="pane"><h3 class="sec">Settings</h3>
+<div class="card"><h3>Provider &amp; model</h3><p class="sub">Pick a provider, fetch its models, choose one — no typing model names by hand.</p>
 <label>Provider</label><select id="set-provider"></select>
 <label>API base URL</label><input id="set-base" placeholder="API base URL">
-<label>Model</label><input id="set-model" placeholder="Model, e.g. muse-spark-1.3">
-<label>API key (leave blank to keep)</label><input id="set-key" placeholder="API key" type="password">
+<label>API key <span class="hint">— leave blank to keep the saved one</span></label><input id="set-key" placeholder="API key" type="password">
+<label>Model</label>
+<div class="modelrow"><input id="set-model" list="model-datalist" placeholder="Fetch models, then pick one…" autocomplete="off"><datalist id="model-datalist"></datalist><button class="btn" id="fetch-models-btn" onclick="fetchModels()">Fetch models</button><button class="btn" id="test-model-btn" onclick="testModel()">Test</button></div>
+<input id="model-filter" placeholder="Filter the model list…" oninput="filterModels()" style="margin-top:8px">
+<div class="status" id="model-status"></div>
+<p class="note">Fetching asks the provider's <span style="font-family:monospace">/v1/models</span> endpoint with your key — the key is never shown or logged. <b>Test</b> sends one tiny message ("Reply with the single word OK") to the chosen model and shows whether it answers and how fast. If a provider blocks its model list (Gemini's OpenAI-compatible endpoint often does), you still see suggested models — or just type any model name in the box above.</p>
+</div>
+<div class="card"><h3>Web &amp; access</h3>
 <label>Your name</label><input id="set-user" placeholder="Your name">
 <label>Web port</label><input id="set-port" placeholder="8080" type="number">
-<label>Domain (optional, for the web link)</label><input id="set-domain" placeholder="muse99.example.com">
-<label><input id="set-tls" type="checkbox" style="width:auto"> SSL / HTTPS on</label>
-<label><input id="set-shell" type="checkbox" style="width:auto"> Allow shell commands</label>
+<label>Domain <span class="hint">— optional, for the web link</span></label><input id="set-domain" placeholder="muse99.example.com">
+<label style="display:flex;gap:8px;align-items:center"><input id="set-tls" type="checkbox" style="width:auto"> SSL / HTTPS on</label>
+<label style="display:flex;gap:8px;align-items:center"><input id="set-shell" type="checkbox" style="width:auto"> Allow shell commands</label>
 <p class="note">Lets Muse99 run commands on this server. Only turn on in a folder you trust. Takes effect immediately — no restart needed.</p>
-<br><br><button class="action" onclick="saveSettings()">Save settings</button>
+</div>
+<div class="card" id="usagebox"><h3>Token usage</h3><span id="usage-detail">Loading…</span><div class="kv" id="settings" style="margin-top:10px"></div></div>
+<br><button class="btn primary" onclick="saveSettings()">Save settings</button>
 <p class="note">Saved to ~/.muse99/config.json (600 permissions). Changing the port or SSL needs a restart of the web UI — do it from the SSH menu (Restart web UI).</p></div>
 </main></div>
-<form id="f"><div class="row"><input id="in" autocomplete="off" placeholder="Ask Muse99 to do something…"><button>Send</button></div></form>
+<form id="f" class="composer"><div class="row"><input id="in" autocomplete="off" placeholder="Ask Muse99 to do something…"><button>Send</button></div></form>
 <script>
 const chat=document.getElementById('chat'),inp=document.getElementById('in'),think=document.getElementById('thinking');
 document.getElementById('addr').textContent=window.location.href;
-function tab(name,btn){document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));document.getElementById('pane-'+name).classList.add('active');document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');if(name==='files')loadFiles('');if(name==='tasks')loadTasks();if(name==='memory'){loadMemory();loadMemories();}if(name==='servers')loadServers();if(name==='settings')loadSettings();}
+function tab(name,btn){document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));document.getElementById('pane-'+name).classList.add('active');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');if(name==='files')loadFiles('');if(name==='tasks')loadTasks();if(name==='memory'){loadMemory();loadMemories();}if(name==='servers')loadServers();if(name==='settings')loadSettings();}
 function add(t,cls,tools){const d=document.createElement('div');d.className='msg '+cls;d.textContent=t;if(tools&&tools.length){const x=document.createElement('div');x.className='tools';x.textContent='Tools: '+tools.join(' · ');d.appendChild(x);}chat.appendChild(d);window.scrollTo(0,document.body.scrollHeight);}
 add("Hey Takahashi, I'm Muse99 in your browser. Give me a task and I'll work it till the end — files, shell, tests, and verification.","muse");
 function fmtUsage(u){if(!u||!u.calls)return 'No tokens used yet';return u.prompt_tokens.toLocaleString()+' in / '+u.completion_tokens.toLocaleString()+' out · est. $'+Number(u.estimated_cost_usd).toFixed(4)+' (Spark rates)';}
 loadStatus();
 let currentChatId=null;
-async function loadChats(){const q=document.getElementById('chat-search').value.trim();const r=await fetch('/api/chats'+(q?'?q='+encodeURIComponent(q):''));const j=await r.json();const list=document.getElementById('chatlist');list.innerHTML=(j||[]).map(c=>'<div class="chatitem'+(c.id===currentChatId?' active':'')+'" onclick="openChat(\''+c.id+'\')"><span>'+escapeHtml(c.title||'Chat')+'</span><button title="Rename" onclick="event.stopPropagation();renameChat(\''+c.id+'\',\''+escapeHtml(c.title||'').replace(/'/g,'')+'\')">✎</button><button title="Delete" onclick="event.stopPropagation();deleteChat(\''+c.id+'\')">✕</button></div>').join('')||'(no chats yet)';}
+let allModels=[];
+async function loadChats(){const q=document.getElementById('chat-search').value.trim();const r=await fetch('/api/chats'+(q?'?q='+encodeURIComponent(q):''));const j=await r.json();const list=document.getElementById('chatlist');list.innerHTML=(j||[]).map(c=>'<div class="chatitem'+(c.id===currentChatId?' active':'')+'" onclick="openChat(\''+c.id+'\')"><span>'+escapeHtml(c.title||'Chat')+'</span><button title="Rename" onclick="event.stopPropagation();renameChat(\''+c.id+'\',\''+escapeHtml(c.title||'').replace(/'/g,'')+'\')">✎</button><button title="Delete" onclick="event.stopPropagation();deleteChat(\''+c.id+'\')">✕</button></div>').join('')||'<div class="empty">(no chats yet)</div>';}
 function escapeHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 async function openChat(id){currentChatId=id;const r=await fetch('/api/chats/'+id+'/messages');const j=await r.json();chat.innerHTML='';(j||[]).forEach(m=>{if(m.role==='user')add(m.content,'user');else if(m.role==='assistant')add(m.content,'muse');});loadChats();}
 async function newChat(){const r=await fetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'New chat'})});const j=await r.json();currentChatId=j.id;chat.innerHTML='';add("New chat — what should we do?","muse");loadChats();}
 async function renameChat(id,title){const t=prompt('Rename chat',title);if(!t)return;await fetch('/api/chats/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t})});loadChats();}
 async function deleteChat(id){if(!confirm('Delete this chat and all its messages?'))return;await fetch('/api/chats/'+id,{method:'DELETE'});if(currentChatId===id){currentChatId=null;chat.innerHTML='';}loadChats();}
-async function loadMemories(){const r=await fetch('/api/memories');const j=await r.json();document.getElementById('memlist').innerHTML=(j||[]).map(m=>'<div class="card"><b>['+escapeHtml(m.kind||'fact')+']</b> '+escapeHtml(m.text)+' <span class="muted">'+(m.created_at||'').slice(0,10)+'</span> <button onclick="deleteMemory(\''+m.id+'\')">Delete</button></div>').join('')||'(no memories saved yet)';}
+async function loadMemories(){const r=await fetch('/api/memories');const j=await r.json();document.getElementById('memlist').innerHTML=(j||[]).map(m=>'<div class="card"><b>['+escapeHtml(m.kind||'fact')+']</b> '+escapeHtml(m.text)+' <span class="muted">'+(m.created_at||'').slice(0,10)+'</span> <button class="btn ghost" onclick="deleteMemory(\''+m.id+'\')">Delete</button></div>').join('')||'<div class="empty">(no memories saved yet)</div>';}
 async function deleteMemory(id){await fetch('/api/memories/'+id,{method:'DELETE'});loadMemories();}
 async function summariseChat(){const r=await fetch('/api/chats/'+(currentChatId||'')+'/summarise',{method:'POST'});const j=await r.json();alert('Saved '+(j.saved||0)+' new fact(s) to memory.');loadMemories();}
 async function toggleShell(){const on=document.getElementById('shell-toggle').checked;await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow_shell:on})});document.getElementById('shellbox').classList.toggle('on',on);loadStatus();}
@@ -730,15 +899,23 @@ async function loadStatus(){const r=await fetch('/api/status');const s=await r.j
 loadChats();
 document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;add(v,'user');inp.value='';think.style.display='block';try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';add(j.reply||j.error||'(no reply)','muse',j.tools);}catch(err){think.style.display='none';add('Could not reach server: '+err,'muse');}});
 async function clearChat(){await fetch('/api/clear',{method:'POST'});chat.innerHTML='';add('Chat cleared. Memory is kept.','muse');}
-async function loadFiles(p){const r=await fetch('/api/files?path='+encodeURIComponent(p||''));const j=await r.json();document.getElementById('filelist').innerHTML=j.files.map(f=>'<div class="card" style="cursor:pointer" onclick="viewFile(\''+f.path.replace(/'/g,'')+'\','+f.dir+')">'+(f.dir?'📁 ':'📄 ')+f.name+'</div>').join('')||'(empty)';}
+async function loadFiles(p){const r=await fetch('/api/files?path='+encodeURIComponent(p||''));const j=await r.json();document.getElementById('filelist').innerHTML=j.files.map(f=>'<div class="card" style="cursor:pointer;padding:12px 16px" onclick="viewFile(\''+f.path.replace(/'/g,'')+'\','+f.dir+')">'+(f.dir?'📁 ':'📄 ')+f.name+'</div>').join('')||'<div class="empty">(empty)</div>';}
 async function viewFile(p,isDir){if(isDir){loadFiles(p);return;}const r=await fetch('/api/file?path='+encodeURIComponent(p));const j=await r.json();document.getElementById('fileview').textContent=j.content||'(empty)';}
-async function loadTasks(){const r=await fetch('/api/task');const j=await r.json();document.getElementById('tasklist').innerHTML=j.map(t=>'<div class="card"><b>'+t.goal+'</b><br>Status: '+t.status+' · '+t.id+'<br>'+(t.summary||'')+'</div>').join('')||'(no tasks yet)';}
+async function loadTasks(){const r=await fetch('/api/task');const j=await r.json();document.getElementById('tasklist').innerHTML=j.map(t=>'<div class="card"><b>'+t.goal+'</b><br>Status: '+t.status+' · '+t.id+'<br>'+(t.summary||'')+'</div>').join('')||'<div class="empty">(no tasks yet)</div>';}
 async function startTask(){const g=document.getElementById('taskgoal').value.trim();if(!g)return;await fetch('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal:g})});document.getElementById('taskgoal').value='';setTimeout(loadTasks,1000);add('Started autonomous task: '+g,'muse');}
 async function loadMemory(){const r=await fetch('/api/memory');const j=await r.json();document.getElementById('mem').value=j.memory||'';}
 async function saveMemory(){await fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({memory:document.getElementById('mem').value})});alert('Saved');}
-async function loadServers(){const r=await fetch('/api/servers');const j=await r.json();document.getElementById('srvlist').innerHTML=j.map(s=>'<div class="card">'+s.name+' — '+s.user+'@'+s.host+':'+s.port+'</div>').join('')||'(no servers — Muse99 only uses servers you add here)';}
+async function loadServers(){const r=await fetch('/api/servers');const j=await r.json();document.getElementById('srvlist').innerHTML=j.map(s=>'<div class="card">'+s.name+' — '+s.user+'@'+s.host+':'+s.port+'</div>').join('')||'<div class="empty">(no servers — Muse99 only uses servers you add here)</div>';}
 async function addServer(){const b={name:document.getElementById('srv-name').value,user:document.getElementById('srv-user').value,host:document.getElementById('srv-host').value,port:parseInt(document.getElementById('srv-port').value||'22')};await fetch('/api/servers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});loadServers();}
+// --- model discovery (v4) ---
+function modelStatus(msg,cls){const el=document.getElementById('model-status');el.textContent=msg;el.className='status'+(cls?' '+cls:'');}
+function fillModelList(models,source,fetchedAt){allModels=models||[];const dl=document.getElementById('model-datalist');dl.innerHTML=allModels.map(m=>'<option value="'+escapeHtml(m.id)+'">').join('');if(source){const when=fetchedAt?new Date(fetchedAt).toLocaleString():'';modelStatus(allModels.length+' model'+(allModels.length===1?'':'s')+' · '+(source==='live'?'live from provider':source==='suggested'?'suggested models (provider list was empty)':'cached'+(when?' · last fetched '+when:''))+(source==='cached'?' — press Fetch models to refresh':''),'');}}
+function filterModels(){const q=document.getElementById('model-filter').value.trim().toLowerCase();const dl=document.getElementById('model-datalist');const shown=allModels.filter(m=>!q||m.id.toLowerCase().includes(q));dl.innerHTML=shown.map(m=>'<option value="'+escapeHtml(m.id)+'">').join('');if(q)modelStatus(shown.length+' of '+allModels.length+' models match "'+q+'"','');}
+async function refreshModelList(){const p=document.getElementById('set-provider').value;try{const r=await fetch('/api/models?provider='+encodeURIComponent(p));const j=await r.json();if(j.error){modelStatus(j.error,'bad');if(j.models&&j.models.length)fillModelList(j.models,'cached','');return;}fillModelList(j.models,j.source,j.fetched_at);}catch(e){modelStatus('Could not load models: '+e,'bad');}}
+async function fetchModels(){const btn=document.getElementById('fetch-models-btn');btn.disabled=true;modelStatus('Fetching models from provider…','');try{const b={provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value};const r=await fetch('/api/models/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error){modelStatus(j.error,'bad');}else{fillModelList(j.models,j.source,j.fetched_at);if(!j.models||!j.models.length)modelStatus('Provider returned no models — type a model name by hand, or try another provider.','bad');}}catch(e){modelStatus('Fetch failed: '+e,'bad');}btn.disabled=false;}
+async function testModel(){const m=document.getElementById('set-model').value.trim();if(!m){modelStatus('Pick or type a model first.','bad');return;}const btn=document.getElementById('test-model-btn');btn.disabled=true;modelStatus('Testing '+m+'…','');try{const b={provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value,model:m};const r=await fetch('/api/models/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok){modelStatus('✓ '+j.model+' works — replied "'+j.reply+'" in '+j.latency_ms+' ms.','ok');}else{modelStatus('✗ '+j.model+' failed: '+(j.error||'unknown error'),'bad');}}catch(e){modelStatus('Test failed: '+e,'bad');}btn.disabled=false;}
 let settingsData=null;
-async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+'<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';document.getElementById('set-base').value=j.base_url||'';document.getElementById('set-model').value=j.model||'';document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||8080;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';document.getElementById('set-model').value=p.model||'';}};}
-async function saveSettings(){const b={active_provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,model:document.getElementById('set-model').value,api_key:document.getElementById('set-key').value,user_name:document.getElementById('set-user').value,port:parseInt(document.getElementById('set-port').value||'8080'),domain:document.getElementById('set-domain').value,tls_enabled:document.getElementById('set-tls').checked,allow_shell:document.getElementById('set-shell').checked};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});alert('Saved — restart the web UI from the SSH menu if you changed the port or SSL.');loadSettings();}
-</script></body></html>`
+async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+'<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';document.getElementById('set-base').value=j.base_url||'';document.getElementById('set-model').value=j.model||'';document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||8080;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';document.getElementById('set-model').value=p.model||'';}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}refreshModelList();}
+async function saveSettings(){const b={active_provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,model:document.getElementById('set-model').value,api_key:document.getElementById('set-key').value,user_name:document.getElementById('set-user').value,port:parseInt(document.getElementById('set-port').value||'8080'),domain:document.getElementById('set-domain').value,tls_enabled:document.getElementById('set-tls').checked,allow_shell:document.getElementById('set-shell').checked};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});alert('Saved — restart the web UI from the SSH menu if you changed the port or SSL.');loadSettings();loadStatus();}
+</script></body></html>
+`
