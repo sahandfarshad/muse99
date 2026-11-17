@@ -1,0 +1,306 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func toolDefinitions() []ToolDef {
+	def := func(name, desc string, props map[string]any, required []string) ToolDef {
+		var t ToolDef
+		t.Type = "function"
+		t.Function.Name = name
+		t.Function.Description = desc
+		t.Function.Parameters = map[string]any{
+			"type": "object", "properties": props, "required": required,
+		}
+		return t
+	}
+	str := func() map[string]any { return map[string]any{"type": "string"} }
+	boolean := func() map[string]any { return map[string]any{"type": "boolean"} }
+	_ = boolean
+
+	return []ToolDef{
+		def("read_file", "Read a file as text.", map[string]any{"path": str()}, []string{"path"}),
+		def("write_file", "Write (create or overwrite) a file. Create parent folders as needed.", map[string]any{"path": str(), "content": str()}, []string{"path", "content"}),
+		def("edit_file", "Replace old_text with new_text in a file. Use for precise edits, not full rewrites.", map[string]any{"path": str(), "old_text": str(), "new_text": str()}, []string{"path", "old_text", "new_text"}),
+		def("list_files", "List files in a directory.", map[string]any{"path": str()}, []string{"path"}),
+		def("search_files", "Search file contents for text (like grep -r). Returns file:line matches.", map[string]any{"query": str(), "path": str()}, []string{"query"}),
+		def("run_shell", "Run a shell command, return stdout/stderr. Use for build, test, git, docker.", map[string]any{"command": str()}, []string{"command"}),
+		def("remote_shell", "Run a command on a remote server you have access to, via ssh. server is a name from servers.json, or user@host. Only use servers the user explicitly gave you access to.", map[string]any{"server": str(), "command": str()}, []string{"server", "command"}),
+		def("git_run", "Run a safe git command in the workdir, e.g. status, log --oneline -10, diff --stat, add, commit -m.", map[string]any{"command": str()}, []string{"command"}),
+		def("fetch_url", "Fetch a URL as text (truncated).", map[string]any{"url": str()}, []string{"url"}),
+		def("web_search", "Search the web (DuckDuckGo lite). Returns titles and links.", map[string]any{"query": str()}, []string{"query"}),
+		def("scaffold_app", "Create a starter app in a folder: kind is one of go-cli, web-html, python-cli, node-express. Creates real files, README and a run script.", map[string]any{"kind": str(), "name": str(), "path": str()}, []string{"kind", "name"}),
+		def("spawn_subtask", "Split off an independent sub-task to a sub-agent. It runs its own tool loop (max 10 steps) and returns a summary. Use for parallel pieces of a big task.", map[string]any{"task": str()}, []string{"task"}),
+		def("get_time", "Get the current date and time.", map[string]any{}, []string{}),
+		def("remember", "Save a durable fact about the user to MEMORY.md.", map[string]any{"fact": str()}, []string{"fact"}),
+		def("set_goal", "Save a user goal (title + status).", map[string]any{"title": str()}, []string{"title"}),
+	}
+}
+
+type toolRunner struct {
+	workdir    string
+	memoryPath string
+	allowShell bool
+	// delegate is set by main for spawn_subtask — a sub-agent turn.
+	delegate func(task string) string
+	client    *Client
+	tools     []ToolDef
+}
+
+func (r *toolRunner) run(name, argsJSON string) string {
+	var args map[string]any
+	_ = json.Unmarshal([]byte(argsJSON), &args)
+	get := func(k string) string {
+		if v, ok := args[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+
+	switch name {
+	case "read_file":
+		data, err := os.ReadFile(safePath(r.workdir, get("path")))
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return truncate(string(data), 20000)
+
+	case "write_file":
+		p := safePath(r.workdir, get("path"))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return "error: " + err.Error()
+		}
+		if err := os.WriteFile(p, []byte(get("content")), 0o644); err != nil {
+			return "error: " + err.Error()
+		}
+		return fmt.Sprintf("wrote %s (%d bytes)", p, len(get("content")))
+
+	case "edit_file":
+		p := safePath(r.workdir, get("path"))
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		oldText, newText := get("old_text"), get("new_text")
+		if !strings.Contains(string(data), oldText) {
+			return "error: old_text not found in file — read the file first and copy it exactly"
+		}
+		out := strings.Replace(string(data), oldText, newText, 1)
+		if err := os.WriteFile(p, []byte(out), 0o644); err != nil {
+			return "error: " + err.Error()
+		}
+		return "edited " + p
+
+	case "list_files":
+		p := safePath(r.workdir, get("path"))
+		if p == "" {
+			p = r.workdir
+		}
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		var out []string
+		for _, e := range entries {
+			if e.IsDir() {
+				out = append(out, e.Name()+"/")
+			} else {
+				out = append(out, e.Name())
+			}
+		}
+		return strings.Join(out, "\n")
+
+	case "search_files":
+		q := get("query")
+		root := safePath(r.workdir, get("path"))
+		if root == "" {
+			root = r.workdir
+		}
+		var out []string
+		_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || info.Size() > 500000 {
+				return nil
+			}
+			if strings.Contains(p, "/.git/") || strings.Contains(p, "/node_modules/") {
+				return nil
+			}
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return nil
+			}
+			for i, line := range strings.Split(string(data), "\n") {
+				if strings.Contains(strings.ToLower(line), strings.ToLower(q)) {
+					out = append(out, fmt.Sprintf("%s:%d: %s", p, i+1, strings.TrimSpace(line)))
+					if len(out) > 100 {
+						return filepath.SkipAll
+					}
+				}
+			}
+			return nil
+		})
+		if len(out) == 0 {
+			return "no matches for " + q
+		}
+		return strings.Join(out, "\n")
+
+	case "run_shell":
+		if !r.allowShell {
+			return "error: shell is disabled. Run with --allow-shell to enable run_shell."
+		}
+		return r.shell(get("command"), r.workdir)
+
+	case "remote_shell":
+		if !r.allowShell {
+			return "error: shell is disabled. Run with --allow-shell."
+		}
+		server := get("server")
+		// Resolve a named server from servers.json
+		target := server
+		for _, s := range loadServers() {
+			if s.Name == server && s.Enabled {
+				target = fmt.Sprintf("%s@%s", s.User, s.Host)
+				if s.Port != 0 && s.Port != 22 {
+					target = fmt.Sprintf("-p %d %s", s.Port, target)
+				}
+				break
+			}
+		}
+		// Use the system ssh binary — no extra Go dependency, works on Ubuntu.
+		// StrictHostKeyChecking is left on by default for safety.
+		cmd := fmt.Sprintf("ssh -o BatchMode=yes -o ConnectTimeout=10 %s %q", target, get("command"))
+		return r.shell(cmd, r.workdir)
+
+	case "git_run":
+		if !r.allowShell {
+			return "error: shell is disabled."
+		}
+		// Block destructive / credential operations.
+		lower := strings.ToLower(get("command"))
+		for _, bad := range []string{"push --force", "reset --hard", "clean -f", "credential"} {
+			if strings.Contains(lower, bad) {
+				return "error: blocked git command: " + bad
+			}
+		}
+		return r.shell("git "+get("command"), r.workdir)
+
+	case "fetch_url":
+		client := &http.Client{Timeout: 20 * time.Second}
+		resp, err := client.Get(get("url"))
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 20000))
+		return fmt.Sprintf("HTTP %d\n%s", resp.StatusCode, string(body))
+
+	case "web_search":
+		u := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(get("query"))
+		client := &http.Client{Timeout: 20 * time.Second}
+		resp, err := client.Get(u)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 20000))
+		// Lite HTML is plain — strip tags roughly and return text.
+		s := string(body)
+		s = strings.ReplaceAll(s, "<", "\n<")
+		return truncate(s, 8000)
+
+	case "scaffold_app":
+		return r.scaffold(get("kind"), get("name"), get("path"))
+
+	case "spawn_subtask":
+		if r.delegate == nil {
+			return "error: subagents not available in this mode"
+		}
+		return r.delegate(get("task"))
+
+	case "get_time":
+		return time.Now().Format("Monday 2006-01-02 15:04:05 MST")
+
+	case "remember":
+		if err := rememberFact(r.memoryPath, get("fact")); err != nil {
+			return "error: " + err.Error()
+		}
+		return "saved to memory"
+
+	case "set_goal":
+		goals := loadGoals()
+		goals = append(goals, Goal{Title: get("title"), Status: "active", CreatedAt: time.Now().Format("2006-01-02")})
+		_ = saveGoals(goals)
+		return "goal saved: " + get("title")
+
+	default:
+		return "error: unknown tool " + name
+	}
+}
+
+func (r *toolRunner) shell(command, dir string) string {
+	cmd := exec.Command("bash", "-c", command)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	s := truncate(string(out), 10000)
+	if err != nil {
+		return fmt.Sprintf("exit error: %v\n%s", err, s)
+	}
+	return s
+}
+
+func (r *toolRunner) scaffold(kind, name, path string) string {
+	if name == "" {
+		name = "app"
+	}
+	dir := safePath(r.workdir, path)
+	if dir == r.workdir || path == "" {
+		dir = filepath.Join(r.workdir, name)
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	write := func(rel, content string) {
+		_ = os.WriteFile(filepath.Join(dir, rel), []byte(content), 0o644)
+	}
+	switch kind {
+	case "web-html":
+		write("index.html", "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>"+name+"</title><link rel=\"stylesheet\" href=\"style.css\"></head><body><h1>"+name+"</h1><p>Built by Muse99.</p><script src=\"app.js\"></script></body></html>\n")
+		write("style.css", "body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 16px}\n")
+		write("app.js", "console.log('"+name+" ready');\n")
+	case "python-cli":
+		write("main.py", "def main():\n    print('Hello from "+name+"')\n\nif __name__ == '__main__':\n    main()\n")
+		write("requirements.txt", "")
+	case "node-express":
+		write("package.json", "{\"name\":\""+name+"\",\"version\":\"1.0.0\",\"main\":\"index.js\",\"scripts\":{\"start\":\"node index.js\"},\"dependencies\":{\"express\":\"^4.19.0\"}}\n")
+		write("index.js", "const express=require('express');const app=express();app.get('/',(req,res)=>res.send('Hello from "+name+"'));app.listen(3000,()=>console.log('http://localhost:3000'));\n")
+	default: // go-cli
+		write("go.mod", "module "+name+"\n\ngo 1.23\n")
+		write("main.go", "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"Hello from "+name+"\") }\n")
+	}
+	write("README.md", "# "+name+"\n\nBuilt by Muse99.\n\nRun: see the project files.\n")
+	return "scaffolded " + kind + " app at " + dir
+}
+
+func safePath(workdir, p string) string {
+	if p == "" {
+		return workdir
+	}
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
+	}
+	return filepath.Join(workdir, p)
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "\n...[truncated]"
+	}
+	return s
+}
