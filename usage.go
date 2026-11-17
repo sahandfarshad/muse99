@@ -48,11 +48,23 @@ func estimatedCost(prompt, completion int) float64 {
 		float64(completion)/1_000_000*sparkOutputPerMillion
 }
 
-// loadUsage reads the persisted totals (zero value when none yet).
-func loadUsage() UsageTotals {
+// loadUsageFromJSONFile reads the old usage.json totals (zero value when none yet).
+func loadUsageFromJSONFile() UsageTotals {
 	var u UsageTotals
 	loadJSON("usage.json", &u)
 	return u
+}
+
+// loadUsage reads the persisted totals (zero value when none yet).
+// The DB is the source of truth when it is open; usage.json is the
+// fallback (and is still written on every call as an export).
+func loadUsage() UsageTotals {
+	if appDB != nil {
+		if u, ok := appDB.loadUsageDB(); ok {
+			return u
+		}
+	}
+	return loadUsageFromJSONFile()
 }
 
 // setUsageLabel tags the next recorded calls, e.g. "task task-123".
@@ -84,6 +96,9 @@ func recordUsage(prompt, completion int) UsageTotals {
 	u.EstimatedCostUSD = estimatedCost(u.PromptTokens, u.CompletionTokens)
 	u.UpdatedAt = time.Now()
 	_ = saveJSON("usage.json", u)
+	if appDB != nil {
+		_ = appDB.saveUsageDB(u)
+	}
 	return u
 }
 
