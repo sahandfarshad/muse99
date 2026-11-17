@@ -1043,3 +1043,295 @@ func TestInstallScriptHasNoExportBlock(t *testing.T) {
 		t.Fatal("install.sh should point at Settings → Provider & model for the API key")
 	}
 }
+
+// ---------- v6: no model text input, click-to-test, Gemini fixes ----------
+
+func TestGeminiModelPrefixStripping(t *testing.T) {
+	// Gemini's native list returns "name": "models/gemini-2.5-flash".
+	m, err := parseModelsResponse([]byte(`{"models":[{"name":"models/gemini-2.5-flash","displayName":"Gemini 2.5 Flash"},{"name":"models/gemini-2.5-pro"}]}`))
+	if err != nil || len(m) != 2 || m[0].ID != "gemini-2.5-flash" || m[1].ID != "gemini-2.5-pro" {
+		t.Fatalf("native name shape: models=%+v err=%v", m, err)
+	}
+	// The OpenAI-compat list can also carry the prefix in "id".
+	m, err = parseModelsResponse([]byte(`{"data":[{"id":"models/gemini-2.0-flash","owned_by":"google"}]}`))
+	if err != nil || len(m) != 1 || m[0].ID != "gemini-2.0-flash" {
+		t.Fatalf("prefixed id shape: models=%+v err=%v", m, err)
+	}
+	// Plain strings with the prefix are stripped too.
+	m, err = parseModelsResponse([]byte(`["models/gemini-2.5-flash"]`))
+	if err != nil || len(m) != 1 || m[0].ID != "gemini-2.5-flash" {
+		t.Fatalf("prefixed string shape: models=%+v err=%v", m, err)
+	}
+	if normalizeModelID("models/gemini-2.5-flash") != "gemini-2.5-flash" {
+		t.Fatal("normalizeModelID must strip the models/ prefix")
+	}
+	if normalizeModelID("gemini-2.5-flash") != "gemini-2.5-flash" {
+		t.Fatal("normalizeModelID must leave bare ids alone")
+	}
+	// A prefixed model must never reach a chat request either.
+	c := NewClient("https://generativelanguage.googleapis.com/v1beta/openai/", "k", "models/gemini-2.5-flash")
+	if c.Model != "gemini-2.5-flash" {
+		t.Fatalf("NewClient must strip the prefix, got %q", c.Model)
+	}
+	// …and never be saved to config.
+	fc := FileConfig{}
+	fc.setProvider(Provider{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "models/gemini-2.5-flash", APIKey: "k"})
+	if fc.Providers["gemini"].Model != "gemini-2.5-flash" {
+		t.Fatalf("setProvider must strip the prefix, got %q", fc.Providers["gemini"].Model)
+	}
+}
+
+// geminiMockServer mimics Gemini's quirks: the OpenAI-compat /models
+// endpoint rejects Bearer (401) but accepts x-goog-api-key, the native
+// /v1beta/models endpoint answers with "models/..." names, and chat
+// completions reject Bearer but accept x-goog-api-key — and reject a
+// prefixed model id outright.
+func geminiMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// The native list endpoint, reached via fetchGeminiNativeModels
+		// when the compat endpoint is empty.
+		if r.URL.Path == "/v1beta/models" {
+			if r.Header.Get("x-goog-api-key") != "gem-key-1" {
+				w.WriteHeader(401)
+				fmt.Fprint(w, `{"error":{"message":"bad key"}}`)
+				return
+			}
+			fmt.Fprint(w, `{"models":[{"name":"models/gemini-2.5-flash"},{"name":"models/gemini-2.5-pro"}]}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			// Compat endpoint: Bearer is refused, x-goog-api-key works.
+			if r.Header.Get("x-goog-api-key") == "gem-key-1" {
+				fmt.Fprint(w, `{"data":[{"id":"gemini-2.5-flash"},{"id":"gemini-2.5-pro"}]}`)
+				return
+			}
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"error":{"message":"Bearer not accepted here"}}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			var body struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if strings.HasPrefix(body.Model, "models/") {
+				w.WriteHeader(404)
+				fmt.Fprint(w, `{"error":{"message":"model not found"}}`)
+				return
+			}
+			if r.Header.Get("x-goog-api-key") == "gem-key-1" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "OK"}}},
+					"usage":   map[string]any{"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+				})
+				return
+			}
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"error":{"message":"bad key"}}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+}
+
+func TestGeminiAuthFallback(t *testing.T) {
+	mock := geminiMockServer(t)
+	defer mock.Close()
+	// Compat list: Bearer 401 -> x-goog-api-key retry -> live list.
+	models, source, err := fetchModelsLive(mock.URL+"/v1beta/openai", "gem-key-1", "gemini")
+	if err != nil || source != "live" || len(models) != 2 || models[0].ID != "gemini-2.5-flash" {
+		t.Fatalf("gemini list with x-goog-api-key fallback: models=%+v source=%s err=%v", models, source, err)
+	}
+	// Chat completions: Bearer 401 -> x-goog-api-key retry -> OK.
+	reply, _, err := testModel(mock.URL+"/v1beta/openai", "gem-key-1", "gemini-2.5-flash", "gemini")
+	if err != nil || reply != "OK" {
+		t.Fatalf("gemini chat with x-goog-api-key fallback: reply=%q err=%v", reply, err)
+	}
+	// A prefixed model id is stripped before the request, so the
+	// mock's "model not found" 404 never fires.
+	reply, _, err = testModel(mock.URL+"/v1beta/openai", "gem-key-1", "models/gemini-2.5-flash", "gemini")
+	if err != nil || reply != "OK" {
+		t.Fatalf("prefixed model should be stripped before testing, reply=%q err=%v", reply, err)
+	}
+}
+
+func TestGeminiNativeListFallback(t *testing.T) {
+	// Compat endpoint answers empty; the native list saves the day.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1beta/openai/models":
+			fmt.Fprint(w, `{"data":[]}`)
+		case "/v1beta/models":
+			if r.Header.Get("x-goog-api-key") != "gem-key-1" {
+				w.WriteHeader(401)
+				fmt.Fprint(w, `{"error":{"message":"bad key"}}`)
+				return
+			}
+			fmt.Fprint(w, `{"models":[{"name":"models/gemini-2.5-flash"},{"name":"models/gemini-2.0-flash"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mock.Close()
+	models, source, err := fetchModelsLive(mock.URL+"/v1beta/openai", "gem-key-1", "gemini")
+	if err != nil || source != "live" || len(models) != 2 || models[0].ID != "gemini-2.5-flash" {
+		t.Fatalf("gemini native fallback: models=%+v source=%s err=%v", models, source, err)
+	}
+}
+
+func TestNoModelTextInputInSettingsHTML(t *testing.T) {
+	// v6: the Settings page must not have a model text input in the
+	// normal flow — only the clickable list and the hidden manual
+	// fallback (which appears only when Fetch returns nothing).
+	rr := httptest.NewRecorder()
+	s := &webServer{client: NewClient("http://127.0.0.1:9", "", "m"), cfg: Config{UserName: "T"},
+		messages: []Message{{Role: "system", Content: "s"}}, system: "s"}
+	buildMux(s).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	html := rr.Body.String()
+	if strings.Contains(html, `id="set-model"`) {
+		t.Fatal("Settings must not contain a model text input (id=set-model) any more")
+	}
+	if strings.Contains(html, "model-datalist") {
+		t.Fatal("Settings must not contain the model datalist dropdown any more")
+	}
+	for _, want := range []string{`id="model-list"`, `id="fetch-models-btn"`, `id="test-all-btn"`, `id="manual-model-box"`, `id="manual-model"`, "Set active", "Test all", "first 20"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("Settings HTML should contain %q", want)
+		}
+	}
+}
+
+func TestModelActiveEndpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearModelCache()
+	mock := mockProviderServer(t, []string{"model-a", "model-b"}, "OK", false)
+	defer mock.Close()
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "mock",
+		Providers: map[string]Provider{"mock": {Name: "mock", BaseURL: mock.URL, Model: "model-a", APIKey: "test-key-123"}}}
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
+	s := &webServer{client: NewClient(mock.URL, "test-key-123", "model-a"), runner: runner, cfg: cfg,
+		messages: []Message{{Role: "system", Content: "s"}}, system: "s"}
+	mux := buildMux(s)
+
+	// Clicking "Set active" on a model — even one whose id arrived
+	// with a "models/" prefix — saves the bare id and makes it live.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/models/active", strings.NewReader(`{"provider":"mock","model":"models/model-b"}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("set active = %d %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["ok"] != true || resp["model"] != "model-b" {
+		t.Fatalf("set active should return the bare id, got %s", rr.Body.String())
+	}
+	if fc := loadFileConfig(); fc.Providers["mock"].Model != "model-b" {
+		t.Fatalf("set active should persist the bare id, got %q", fc.Providers["mock"].Model)
+	}
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/status", nil))
+	if !strings.Contains(rr.Body.String(), `"model":"model-b"`) {
+		t.Fatalf("status should show the new active model, got %s", rr.Body.String())
+	}
+	// And testing a prefixed id sends the bare id to the provider.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/api/models/test", strings.NewReader(`{"provider":"mock","model":"models/model-a"}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rr, req)
+	testBody := rr.Body.String()
+	var testResp map[string]any
+	if err := json.Unmarshal([]byte(testBody), &testResp); err != nil {
+		t.Fatal(err)
+	}
+	if testResp["ok"] != true || testResp["model"] != "model-a" {
+		t.Fatalf("test of a prefixed id should use the bare id, got %s", testBody)
+	}
+}
+
+// TestSavedProviderSurvivesRestart is the regression test for the
+// v6 Gemini root cause: loadConfig used to fold the Spark flag
+// defaults into the config on every startup, and setProvider
+// unconditionally made Spark the active provider — so a saved Gemini
+// provider was silently dropped after every restart and the live
+// client was Spark with no key ("couldn't connect to Gemini").
+func TestSavedProviderSurvivesRestart(t *testing.T) {
+	fc := FileConfig{}
+	fc.setProvider(Provider{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "gemini-2.5-flash", APIKey: "gem-key-1"})
+	fc.ActiveProvider = "gemini"
+	// No env vars, no flags: the Spark defaults in cfg must NOT
+	// switch the active provider.
+	cfg := Config{BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", APIKey: ""}
+	foldEnvIntoConfig(&cfg, &fc, map[string]bool{}, false)
+	if fc.ActiveProvider != "gemini" {
+		t.Fatalf("saved provider must survive a restart with no env/flags, active=%q", fc.ActiveProvider)
+	}
+	if fc.Providers["gemini"].APIKey != "gem-key-1" {
+		t.Fatalf("saved gemini key must survive, got %q", fc.Providers["gemini"].APIKey)
+	}
+	// But an explicitly given env key DOES win, as before.
+	cfg2 := Config{BaseURL: "https://api.openai.com/v1", Model: "gpt-5", APIKey: "sk-test"}
+	foldEnvIntoConfig(&cfg2, &fc, map[string]bool{}, true)
+	if fc.ActiveProvider != "openai" || fc.Providers["openai"].APIKey != "sk-test" {
+		t.Fatalf("explicit env values should switch provider, active=%q", fc.ActiveProvider)
+	}
+	// And an explicit --model flag does too.
+	fc3 := FileConfig{}
+	fc3.setProvider(Provider{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "gemini-2.5-flash", APIKey: "gem-key-1"})
+	fc3.ActiveProvider = "gemini"
+	cfg3 := Config{BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", APIKey: ""}
+	foldEnvIntoConfig(&cfg3, &fc3, map[string]bool{"model": true}, false)
+	if fc3.ActiveProvider != "spark" {
+		t.Fatalf("explicit --model flag should switch provider, active=%q", fc3.ActiveProvider)
+	}
+}
+
+func TestKeySourceAndSavePreservesEnvKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// On disk, the gemini provider has NO key. At runtime (as if the
+	// key came from env vars, folded in at startup) it has one.
+	fc := loadFileConfig()
+	fc.setProvider(Provider{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "gemini-2.5-flash", APIKey: ""})
+	_ = saveFileConfig(fc)
+	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "gemini", APIKey: "env-key-xyz",
+		Providers: map[string]Provider{"gemini": {Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "gemini-2.5-flash", APIKey: "env-key-xyz"}}}
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
+	s := &webServer{client: NewClient(cfg.BaseURL, cfg.APIKey, cfg.Model), runner: runner, cfg: cfg,
+		messages: []Message{{Role: "system", Content: "s"}}, system: "s"}
+	mux := buildMux(s)
+
+	// Settings must say where the key came from, not "(not set)".
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/settings", nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, `"api_key_source":"env"`) {
+		t.Fatalf("settings should report the key source as env, got %s", body)
+	}
+	if strings.Contains(body, "env-key-xyz") {
+		t.Fatal("settings must never return the raw key")
+	}
+	// Saving Settings with a blank key field must NOT wipe the env key —
+	// it keeps it and persists it to config.json.
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/settings", strings.NewReader(`{"active_provider":"gemini"}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("settings POST = %d %s", rr.Code, rr.Body.String())
+	}
+	if saved := loadFileConfig(); saved.Providers["gemini"].APIKey != "env-key-xyz" {
+		t.Fatalf("saving settings must preserve (and persist) the env key, got %q", saved.Providers["gemini"].APIKey)
+	}
+	// And now the source is "saved".
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/settings", nil))
+	if !strings.Contains(rr.Body.String(), `"api_key_source":"saved"`) {
+		t.Fatalf("after saving, the key source should be saved, got %s", rr.Body.String())
+	}
+}
