@@ -185,6 +185,20 @@ echo ""
 # When run as `curl … | bash`, stdin is the download pipe, not the
 # terminal — so the menu is reopened on /dev/tty when one exists.
 # With no terminal at all (CI, piped runs), print the address and exit.
+# v7: also print the exact menu command (with its full path when
+# ~/.local/bin is not on PATH yet, which is common on a fresh
+# server) — "the menu never opened" usually turns out to be that
+# `muse99` was not on PATH after the install.
+if command -v muse99 >/dev/null 2>&1; then
+  MENU_CMD="muse99"
+else
+  MENU_CMD="$BIN"
+  echo "Note: $HOME/.local/bin is not on your PATH yet, so the plain"
+  echo "\`muse99\` command will not be found. Fix that with:"
+  echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+  echo "(Add that line to ~/.bashrc to keep it.)"
+fi
+echo "To open the SSH menu, run: $MENU_CMD"
 if [ -z "${MUSE99_NO_MENU:-}" ]; then
   if [ -t 0 ]; then
     exec "$BIN"
@@ -192,6 +206,6 @@ if [ -z "${MUSE99_NO_MENU:-}" ]; then
     exec "$BIN" </dev/tty
   else
     echo "No terminal attached — the web UI is running in the background."
-    echo "Run \`muse99\` later to open the SSH menu."
+    echo "Run \`$MENU_CMD\` later to open the SSH menu."
   fi
 fi

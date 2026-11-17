@@ -1451,3 +1451,36 @@ func TestMenuExitZero(t *testing.T) {
 		t.Fatal("menu did not exit on 17 within 5s")
 	}
 }
+
+// TestWebPageScriptRuns is the regression test for the v6/v7 frozen
+// page: the Settings script had `let allModels` declared twice, so
+// the whole script failed to parse, every button on the page was
+// dead, and the Settings space stayed empty — while every test
+// passed, because the tests only curled the JSON endpoints and never
+// ran the page itself. This test extracts the page script and runs
+// it in node with stubbed browser globals (scripts/check-web-js.js),
+// proving it loads, defines its functions, and fills Settings in.
+func TestWebPageScriptRuns(t *testing.T) {
+	if strings.Count(webHTML, "let allModels=") != 1 {
+		t.Fatalf("page script must declare allModels exactly once, found %d", strings.Count(webHTML, "let allModels="))
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available — cannot run the page script check")
+	}
+	start := strings.Index(webHTML, "<script>")
+	end := strings.Index(webHTML, "</script>")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("page HTML has no <script> block")
+	}
+	tmp := filepath.Join(t.TempDir(), "page.js")
+	if err := os.WriteFile(tmp, []byte(webHTML[start+len("<script>"):end]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(node, "scripts/check-web-js.js", tmp)
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("page script check failed: %v\n%s", err, out)
+	}
+}

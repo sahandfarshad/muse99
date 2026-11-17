@@ -65,6 +65,8 @@ Just run `muse99` over SSH:
 
 Everything the server needs is in the menu: start / stop / restart the web UI, change its port, set a domain, set up SSL with Let's Encrypt (it checks for certbot and for existing certificates first), update Muse99 itself to the latest release, and switch API providers. The web link on top shows `https://your-domain` once a domain and SSL are set, otherwise `http://<server-ip>:<port>`. Option 14 toggles shell commands (same setting as the web UI checkbox), and the menu header shows whether shell is ON or OFF. Inside Providers (option 9), **l** lists the current provider's models and lets you pick one by number, and **t** tests a model to see if it answers.
 
+If the menu does not open after installing, it is almost always one of two things: (1) `muse99` is not on your PATH yet on a fresh server — run it by its full path, `~/.local/bin/muse99`, or add `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`; (2) the install ran without a terminal (a web panel, or `ssh host 'curl … | bash'`), so there was no screen to open the menu on — just run `muse99` (or its full path) in a normal SSH session. The installer prints the exact command to run.
+
 ## Chats — side chats that survive a restart
 
 Chats are stored in a small database (`~/.muse99/data/muse99.db`, see below), not in memory only. Start a new chat, switch between them, rename, delete, or search by title or text — in the web UI sidebar, or in terminal chat with `/chats`, `/new [title]`, `/open <number or id>`. On restart, every chat and its messages reload. The first user message becomes the chat title automatically.

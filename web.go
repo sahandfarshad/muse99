@@ -1102,7 +1102,6 @@ add("Hey Takahashi, I'm Muse99 in your browser. Give me a task and I'll work it 
 function fmtUsage(u){if(!u||!u.calls)return 'No tokens used yet';return u.prompt_tokens.toLocaleString()+' in / '+u.completion_tokens.toLocaleString()+' out · est. $'+Number(u.estimated_cost_usd).toFixed(4)+' (Spark rates)';}
 loadStatus();
 let currentChatId=null;
-let allModels=[];
 async function loadChats(){const q=document.getElementById('chat-search').value.trim();const r=await fetch('/api/chats'+(q?'?q='+encodeURIComponent(q):''));const j=await r.json();const list=document.getElementById('chatlist');list.innerHTML=(j||[]).map(c=>'<div class="chatitem'+(c.id===currentChatId?' active':'')+'" onclick="openChat(\''+c.id+'\')"><span>'+escapeHtml(c.title||'Chat')+'</span><button title="Rename" onclick="event.stopPropagation();renameChat(\''+c.id+'\',\''+escapeHtml(c.title||'').replace(/'/g,'')+'\')">✎</button><button title="Delete" onclick="event.stopPropagation();deleteChat(\''+c.id+'\')">✕</button></div>').join('')||'<div class="empty">(no chats yet)</div>';}
 function escapeHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 async function openChat(id){currentChatId=id;const r=await fetch('/api/chats/'+id+'/messages');const j=await r.json();chat.innerHTML='';(j||[]).forEach(m=>{if(m.role==='user')add(m.content,'user');else if(m.role==='assistant')add(m.content,'muse');});loadChats();}
