@@ -468,7 +468,7 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 			}
 			pick := prompt(scanner, "Pick a model number (Enter to keep "+cfg.Model+")", "")
 			if n, err := strconv.Atoi(strings.TrimSpace(pick)); err == nil && n >= 1 && n <= len(list.Models) {
-				cfg.Model = list.Models[n-1].ID
+				cfg.Model = normalizeModelID(list.Models[n-1].ID)
 				if cfg.Providers != nil {
 					p := cfg.Providers[cfg.Provider]
 					p.Model = cfg.Model
@@ -479,9 +479,9 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 				fmt.Println("Model is now", cfg.Model)
 			}
 		case "t", "test":
-			model := prompt(scanner, "Model to test", cfg.Model)
+			model := normalizeModelID(prompt(scanner, "Model to test", cfg.Model))
 			fmt.Printf("Testing %s …\n", model)
-			reply, latency, err := testModel(cfg.BaseURL, cfg.APIKey, model)
+			reply, latency, err := testModel(cfg.BaseURL, cfg.APIKey, model, cfg.Provider)
 			if err != nil {
 				fmt.Println("  ✗ failed:", err)
 				continue
@@ -519,10 +519,10 @@ func providerMenu(cfg *Config, client *Client, ctrl *webController, scanner *buf
 			}
 			if which == "custom" {
 				p.BaseURL = prompt(scanner, "API base URL", p.BaseURL)
-				p.Model = prompt(scanner, "Model", p.Model)
+				p.Model = normalizeModelID(prompt(scanner, "Model", p.Model))
 			} else {
 				if m := prompt(scanner, "Model (Enter to keep "+p.Model+")", p.Model); m != "" {
-					p.Model = m
+					p.Model = normalizeModelID(m)
 				}
 			}
 			key := prompt(scanner, "API key (Enter to keep the saved one)", "")
