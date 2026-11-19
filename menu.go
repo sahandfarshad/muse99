@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -84,7 +83,7 @@ func printMenuHeader(cfg Config, ctrl *webController) {
 	webRunning := ctrl != nil && ctrl.anyWebRunning(cfg)
 	fmt.Print("\033[H\033[2J") // clear screen, keep it tidy over SSH
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("  ✦ Muse99  —  Web UI: %s\n", webAddressFor(cfg))
+	fmt.Printf("  ✦ Muse99 %s  —  Web UI: %s\n", versionLabel(), webAddressFor(cfg))
 	if webRunning {
 		fmt.Println("  Status: web UI is RUNNING  ·  open the address above in your browser")
 	} else {
@@ -118,7 +117,14 @@ func printMenuHeader(cfg Config, ctrl *webController) {
 	} else {
 		fmt.Println("  Web login: NOT SET — the web UI is locked until you set one (option 15)")
 	}
-	fmt.Printf("  User: %s  ·  Workdir: %s\n", cfg.UserName, cfg.Workdir)
+	name := cfg.UserName
+	if n, ok := loadFileConfig().savedUserName(); ok {
+		name = n
+	}
+	if name == "" {
+		name = "(not set — option 17)"
+	}
+	fmt.Printf("  User: %s  ·  Workdir: %s\n", name, cfg.Workdir)
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
 }
@@ -266,6 +272,14 @@ func handOverDB() {
 }
 
 func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, system string, ctrl *webController, scanner *bufio.Scanner) {
+	// First run: ask the user's name once, then use it everywhere.
+	syncUserName(cfg)
+	if !cfg.NameSet {
+		printMenuHeader(*cfg, ctrl)
+		if askUserName(cfg, scanner, true) {
+			system = systemPrompt(cfg.UserName, memoryContextFor("", cfg.MemoryPath), cfg.BaseURL, cfg.Model)
+		}
+	}
 	messages := []Message{{Role: "system", Content: system}}
 
 	for {
@@ -277,7 +291,7 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 		fmt.Println("  5  Choose web port")
 		fmt.Println("  6  Set domain")
 		fmt.Println("  7  Set up SSL / Let's Encrypt")
-		fmt.Println("  8  Update Muse99")
+		fmt.Println("  8  Update / roll back (now " + versionLabel() + ")")
 		fmt.Println("  9  Providers / API keys")
 		fmt.Println("  10 Show memory")
 		fmt.Println("  11 Show usage")
@@ -285,10 +299,11 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 		fmt.Println("  13 Chats")
 		fmt.Println("  14 Toggle shell commands")
 		fmt.Println("  15 Web login (username / password)")
+		fmt.Println("  17 Your name")
 		fmt.Println("  0  Exit")
 		fmt.Println("  16 Uninstall Muse99")
 		fmt.Println()
-		fmt.Print("  Choose [0-16]: ")
+		fmt.Print("  Choose [0-17]: ")
 		if !scanner.Scan() {
 			return
 		}
@@ -415,34 +430,8 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			pause(scanner)
 
 		case "8":
-			if err := selfUpdate(); err != nil {
-				fmt.Println("Update failed:", err)
-				fmt.Println("You can also run the installer again:")
-				fmt.Println("  curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | bash")
-			} else {
-				fmt.Println("Update done.")
-				// v7: always restart the app after an update, so
-				// the new version is the one actually serving —
-				// the old process used to keep running the old
-				// binary until someone stopped it by hand.
-				if ctrl.IsRunning() {
-					if err := ctrl.Restart(*cfg, system); err != nil {
-						fmt.Println("Web UI restart failed:", err)
-					} else {
-						fmt.Println("Web UI restarted with the new version.")
-					}
-				} else {
-					handOverDB()
-					if err := restartDetachedWeb(*cfg); err != nil {
-						fmt.Println("Web UI restart failed:", err)
-						if appDB == nil {
-							_, _ = openAppDB()
-						}
-					} else {
-						fmt.Println("Web UI restarted with the new version.")
-					}
-				}
-				fmt.Println("Note: this menu is still the old version — quit (0) and run muse99 again for the new menu.")
+			if versionsMenu(scanner) {
+				restartWebAfterUpdate(cfg, ctrl, system)
 			}
 			pause(scanner)
 
@@ -473,8 +462,30 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			fmt.Println("Token usage — all time (persisted in ~/.muse99/data/usage.json):")
 			fmt.Println(" ", usageLine(u))
 			fmt.Printf("  API calls: %d\n", u.Calls)
-			if u.LastLabel != "" {
-				fmt.Printf("  Last: %s in / %s out (%s)\n", formatInt(u.LastPromptTokens), formatInt(u.LastCompletion), u.LastLabel)
+			if u.LastTotal > 0 {
+				last := fmt.Sprintf("  Last call: %s in / %s out", formatInt(u.LastPromptTokens), formatInt(u.LastCompletion))
+				if u.LastModel != "" {
+					last += " · " + u.LastModel
+				}
+				if u.LastLabel != "" {
+					last += " (" + u.LastLabel + ")"
+				}
+				fmt.Println(last)
+			}
+			if list := modelUsageList(u); len(list) > 0 {
+				fmt.Println()
+				fmt.Printf("  %-34s %12s %12s %12s %7s\n", "Model", "In", "Out", "Total", "Calls")
+				for _, m := range list {
+					name := m.Model
+					if m.Provider != "" {
+						name = m.Provider + " · " + m.Model
+					}
+					if len([]rune(name)) > 34 {
+						name = string([]rune(name)[:33]) + "…"
+					}
+					fmt.Printf("  %-34s %12s %12s %12s %7d\n", name, formatInt(m.PromptTokens), formatInt(m.CompletionTokens), formatInt(m.TotalTokens), m.Calls)
+				}
+				fmt.Println("  (Per-model counts start from v0.8; older calls are only in the totals.)")
 			}
 			fmt.Println("  Cost is an estimate at Spark rates ($1.25 / 1M in, $4.25 / 1M out).")
 			fmt.Println("  Ollama (local) costs $0 in API fees — its tokens are still counted.")
@@ -536,13 +547,19 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			}
 			pause(scanner)
 
-		case "0", "17", "q", "quit", "exit":
-			// 0 is the exit (17 still works, for muscle memory).
+		case "17":
+			askUserName(cfg, scanner, false)
+			system = systemPrompt(cfg.UserName, memoryContextFor("", cfg.MemoryPath), cfg.BaseURL, cfg.Model)
+			messages[0].Content = system
+			pause(scanner)
+
+		case "0", "q", "quit", "exit":
+			// 0 is the exit (17 is now "Your name").
 			// The web UI keeps running if it was started detached.
 			return
 
 		default:
-			fmt.Println("Please choose 0-16.")
+			fmt.Println("Please choose 0-17.")
 			pause(scanner)
 		}
 	}
@@ -846,66 +863,8 @@ func setupSSL(cfg *Config, ctrl *webController, scanner *bufio.Scanner, system s
 	_ = system
 }
 
-// selfUpdate downloads the latest release binary and replaces the
-// running executable. It downloads to a temp file, verifies it with
-// --help, and only then replaces the current binary.
-func selfUpdate() error {
-	arch := runtime.GOARCH
-	if arch != "amd64" && arch != "arm64" {
-		return fmt.Errorf("unsupported architecture %s (only amd64/arm64 releases exist)", arch)
-	}
-	url := "https://github.com/sahandfarshad/muse99/releases/latest/download/muse99-linux-" + arch
-	fmt.Println("Downloading", url)
-	tmp, err := os.CreateTemp("", "muse99-update-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	defer os.Remove(tmpPath)
-
-	// Prefer curl (same as install.sh); fall back to a plain download.
-	downloaded := false
-	if _, err := exec.LookPath("curl"); err == nil {
-		cmd := exec.Command("curl", "-fsSL", "-o", tmpPath, url)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err == nil {
-			downloaded = true
-		} else {
-			fmt.Println("curl failed, trying a direct download…")
-		}
-	}
-	if !downloaded {
-		if err := downloadFile(url, tmpPath); err != nil {
-			return fmt.Errorf("download failed (no release yet? create a v0.1.0 release first): %w", err)
-		}
-	}
-	if err := os.Chmod(tmpPath, 0o755); err != nil {
-		return err
-	}
-	// Verify the new binary actually runs before replacing anything.
-	if out, err := exec.Command(tmpPath, "--help").CombinedOutput(); err != nil {
-		// Go's flag package exits 0 on -h but 2 on --help in some cases;
-		// accept any output that looks like our help text.
-		if !strings.Contains(string(out), "muse99") && !strings.Contains(string(out), "Usage") {
-			return fmt.Errorf("downloaded binary did not pass --help check: %v (%s)", err, strings.TrimSpace(string(out)))
-		}
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, exe); err != nil {
-		return fmt.Errorf("could not replace %s (do you have write permission there?): %w", exe, err)
-	}
-	fmt.Println("Updated:", exe)
-	return nil
-}
+// selfUpdate installs the latest release (kept for older callers).
+func selfUpdate() error { return installRelease("") }
 
 func downloadFile(url, dest string) error {
 	// Small helper used only as a curl fallback in selfUpdate.

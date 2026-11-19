@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -192,9 +194,15 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	if c.needsThoughtSignature() {
 		ensureThoughtSignatures(messages)
 	}
+	// v0.8: some providers (GLM, some local models) return tool calls
+	// without an id. That history then breaks every other provider
+	// (OpenRouter: "tool messages must include a non-empty string
+	// tool_call_id", Gemini: INVALID_ARGUMENT). Repair ids in place,
+	// and send a cleaned copy where tool calls and results pair up.
+	fillToolCallIDs(messages)
 	reqBody := chatRequest{
 		Model:       c.Model,
-		Messages:    messages,
+		Messages:    sanitizeToolHistory(messages),
 		Tools:       tools,
 		Temperature: 0.7,
 		MaxTokens:   4096,
@@ -263,7 +271,7 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	// Token usage: capture it for every call (some providers/local
 	// models omit it — then nothing is recorded for that call).
 	if out.Usage != nil {
-		recordUsage(out.Usage.PromptTokens, out.Usage.CompletionTokens)
+		recordUsageFor(c.Provider, c.Model, out.Usage.PromptTokens, out.Usage.CompletionTokens)
 	}
 	return out.Choices[0].Message, nil
 }
@@ -287,4 +295,97 @@ func modelTimeout() time.Duration {
 		}
 	}
 	return d
+}
+
+// newToolCallID makes an id for a tool call the provider left blank.
+func newToolCallID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "call_" + hex.EncodeToString(b)
+}
+
+// fillToolCallIDs gives every tool call an id and every tool result
+// the id of the call it answers (results follow their assistant
+// message in order). It changes messages in place, so the stored chat
+// is repaired too. The slice length never changes.
+func fillToolCallIDs(messages []Message) {
+	var pending []string
+	for i := range messages {
+		m := &messages[i]
+		switch m.Role {
+		case "assistant":
+			pending = pending[:0]
+			for j := range m.ToolCalls {
+				if strings.TrimSpace(m.ToolCalls[j].ID) == "" {
+					m.ToolCalls[j].ID = newToolCallID()
+				}
+				if m.ToolCalls[j].Type == "" {
+					m.ToolCalls[j].Type = "function"
+				}
+				pending = append(pending, m.ToolCalls[j].ID)
+			}
+		case "tool":
+			if strings.TrimSpace(m.ToolCallID) == "" && len(pending) > 0 {
+				m.ToolCallID = pending[0]
+			}
+			// Consume the id this result answers.
+			for k, id := range pending {
+				if id == m.ToolCallID {
+					pending = append(pending[:k], pending[k+1:]...)
+					break
+				}
+			}
+		default:
+			pending = pending[:0]
+		}
+	}
+}
+
+// sanitizeToolHistory returns a copy of messages that every
+// OpenAI-compatible provider accepts:
+//   - a tool result whose call is not in the assistant message right
+//     before it (or has no id) becomes a plain user note;
+//   - a tool call that never got a result gets a short placeholder
+//     result, so the call/result pairs are complete;
+//   - tool results come straight after their assistant message.
+func sanitizeToolHistory(messages []Message) []Message {
+	out := make([]Message, 0, len(messages)+2)
+	var open map[string]bool // calls of the last assistant message without a result yet
+	var openOrder []string
+	closeOpen := func() {
+		for _, id := range openOrder {
+			if open[id] {
+				out = append(out, Message{Role: "tool", ToolCallID: id, Content: "(no result — the step was interrupted)"})
+			}
+		}
+		open, openOrder = nil, nil
+	}
+	for _, m := range messages {
+		switch m.Role {
+		case "tool":
+			if m.ToolCallID != "" && open[m.ToolCallID] {
+				out = append(out, m)
+				open[m.ToolCallID] = false
+				continue
+			}
+			// Orphan result: keep the information, drop the tool role.
+			closeOpen()
+			out = append(out, Message{Role: "user", Content: "[earlier tool result]\n" + m.Content})
+		case "assistant":
+			closeOpen()
+			if len(m.ToolCalls) > 0 {
+				open = map[string]bool{}
+				for _, tc := range m.ToolCalls {
+					open[tc.ID] = true
+					openOrder = append(openOrder, tc.ID)
+				}
+			}
+			out = append(out, m)
+		default:
+			closeOpen()
+			out = append(out, m)
+		}
+	}
+	closeOpen()
+	return out
 }

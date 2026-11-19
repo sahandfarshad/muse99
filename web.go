@@ -47,6 +47,8 @@ type chatResp struct {
 	Tools  []string `json:"tools"`
 	Error  string   `json:"error,omitempty"`
 	ChatID string   `json:"chat_id,omitempty"`
+	// v0.8: tokens this reply used and the model that answered.
+	Usage *usageDelta `json:"usage,omitempty"`
 }
 
 // webController owns one HTTP server so the SSH menu can start, stop
@@ -253,9 +255,11 @@ func (s *webServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if isSpark(s.cfg.BaseURL, s.cfg.Model) {
 		mode = "Muse Spark — Muse mode"
 	}
+	syncUserName(&s.cfg)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"model": s.cfg.Model, "mode": mode, "user": s.cfg.UserName,
+		"name_needed": !s.cfg.NameSet, "version": versionLabel(),
 		"workdir": s.cfg.Workdir, "shell": s.runner.shellAllowed(),
 		"base_url": s.cfg.BaseURL, "tasks": len(loadTasks()), "chats": s.chatCount(),
 		"servers": len(loadServers()), "goals": len(loadGoals()),
@@ -494,6 +498,28 @@ func (s *webServer) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	base, key, name := resolveModelTarget(&s.cfg, provider, baseURL, apiKey)
 	list, err := getModels(base, key, name, force)
+	// v0.8: a key / base URL that just fetched models successfully is
+	// saved under that provider's name at once (without switching the
+	// active provider), so it is still there after switching away.
+	if err == nil && list.Source == "live" && strings.TrimSpace(provider) != "" && validProviderName(strings.TrimSpace(provider)) && (apiKey != "" || baseURL != "") {
+		fc := loadFileConfig()
+		fc.ensureProviders()
+		n := strings.TrimSpace(provider)
+		p := fc.Providers[n]
+		p.Name = n
+		if baseURL != "" {
+			p.BaseURL = strings.TrimSpace(baseURL)
+		}
+		if apiKey != "" {
+			p.APIKey = apiKey
+		}
+		fc.Providers[n] = p
+		_ = saveFileConfig(fc)
+		if s.cfg.Providers == nil {
+			s.cfg.Providers = map[string]Provider{}
+		}
+		s.cfg.Providers[n] = mergedProvider(&s.cfg, n)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		// Still answer 200 with an error field (and any cached list
@@ -563,6 +589,11 @@ func (s *webServer) handleModelActive(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = s.cfg.Provider
 	}
+	if !validProviderName(name) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "provider name: letters, digits, - _ . only (max 40)"})
+		return
+	}
 	// Save the model for this provider (keeping its existing key and
 	// base URL when the request does not send new ones), then make
 	// it the live model. Start from the LIVE provider entry, not
@@ -570,18 +601,7 @@ func (s *webServer) handleModelActive(w http.ResponseWriter, r *http.Request) {
 	// may not be in config.json yet, and starting from disk would
 	// wipe its base URL and key.
 	fc := loadFileConfig()
-	p := Provider{Name: name}
-	if live, ok := s.cfg.Providers[name]; ok {
-		p = live
-	}
-	if saved, ok := fc.Providers[name]; ok {
-		if p.BaseURL == "" {
-			p.BaseURL = saved.BaseURL
-		}
-		if p.APIKey == "" {
-			p.APIKey = saved.APIKey
-		}
-	}
+	p := mergedProvider(&s.cfg, name)
 	if body.BaseURL != "" {
 		p.BaseURL = body.BaseURL
 	}
@@ -607,7 +627,7 @@ func (s *webServer) handleModelActive(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Providers = map[string]Provider{}
 	}
 	s.cfg.Providers[name] = active
-	*s.client = *NewClient(s.cfg.BaseURL, s.cfg.APIKey, s.cfg.Model)
+	*s.client = *NewClientForProvider(s.cfg.BaseURL, s.cfg.APIKey, s.cfg.Model, s.cfg.Provider)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "model": model, "provider": name})
 }
@@ -706,7 +726,15 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	before := len(s.messages)
 	refreshSystemFor(&s.cfg, &s.messages, req.Message)
+	usageBefore := loadUsage()
 	reply, tools := runTurnDetailed(s.client, s.runner, s.tools, &s.messages, req.Message)
+	var turnUsage *usageDelta
+	if d := diffUsage(usageBefore, loadUsage()); d.Calls > 0 {
+		if d.Model == "" {
+			d.Model = s.client.Model
+		}
+		turnUsage = &d
+	}
 	persistTurn(s.currentChatID, before, s.messages)
 	if s.db != nil && s.currentChatID != "" {
 		chatID := s.currentChatID
@@ -717,7 +745,7 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(chatResp{Reply: reply, Tools: tools, ChatID: s.currentChatID})
+	_ = json.NewEncoder(w).Encode(chatResp{Reply: reply, Tools: tools, ChatID: s.currentChatID, Usage: turnUsage})
 }
 
 // noAPIKeyNotice is what chat returns (and the UI shows) when no
@@ -837,9 +865,13 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if target == "" {
 			target = s.cfg.Provider
 		}
-		if fc.APIKey == "" {
-			if p, ok := s.cfg.Providers[target]; ok && p.APIKey != "" {
-				fc.APIKey = p.APIKey
+		if fc.ActiveProvider != "" && !validProviderName(fc.ActiveProvider) {
+			http.Error(w, "provider name: letters, digits, - _ . only (max 40)", http.StatusBadRequest)
+			return
+		}
+		if fc.APIKey == "" && target != "" {
+			if k := mergedProvider(&s.cfg, target).APIKey; k != "" {
+				fc.APIKey = k
 			}
 		}
 		fc.Model = normalizeModelID(fc.Model)
@@ -865,7 +897,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			s.cfg.BaseURL = p.BaseURL
 			s.cfg.Model = p.Model
 			s.cfg.APIKey = p.APIKey
-			*s.client = *NewClient(s.cfg.BaseURL, s.cfg.APIKey, s.cfg.Model)
+			*s.client = *NewClientForProvider(s.cfg.BaseURL, s.cfg.APIKey, s.cfg.Model, s.cfg.Provider)
 		} else {
 			if fc.BaseURL != "" {
 				old.BaseURL = fc.BaseURL
@@ -880,7 +912,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 				s.cfg.Model = fc.Model
 			}
 			if fc.BaseURL != "" || fc.APIKey != "" || fc.Model != "" {
-				*s.client = *NewClient(s.cfg.BaseURL, s.cfg.APIKey, s.cfg.Model)
+				*s.client = *NewClientForProvider(s.cfg.BaseURL, s.cfg.APIKey, s.cfg.Model, s.cfg.Provider)
 			}
 			// Keep the active provider's stored copy in sync.
 			if s.cfg.Provider != "" {
@@ -892,9 +924,11 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			s.cfg.AllowShell = *body.AllowShell
 			s.runner.SetAllowShell(*body.AllowShell)
 		}
-		if fc.UserName != "" {
-			old.UserName = fc.UserName
-			s.cfg.UserName = fc.UserName
+		if n := cleanUserName(fc.UserName); n != "" {
+			old.UserName = n
+			old.NameSet = true
+			s.cfg.UserName = n
+			s.cfg.NameSet = true
 		}
 		if fc.Port != 0 {
 			old.Port = fc.Port
@@ -917,6 +951,13 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		// so the next GET showed a blank base URL and no model,
 		// as if no API settings had ever been saved.)
 		_ = saveFileConfig(syncTopLevel(old))
+		// v0.8: keep the live providers in step with what was saved.
+		if s.cfg.Providers == nil {
+			s.cfg.Providers = map[string]Provider{}
+		}
+		for n := range loadFileConfig().Providers {
+			s.cfg.Providers[n] = mergedProvider(&s.cfg, n)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	fc := loadFileConfig()
@@ -938,7 +979,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	active := fc.ActiveProvider
 	activeMasked, activeSource := keySource(active)
 	providers := []map[string]string{}
-	for _, name := range providerPresetNames() {
+	for _, name := range providerNamesFor(fc) {
 		p := fc.Providers[name]
 		masked, source := keySource(name)
 		providers = append(providers, map[string]string{
@@ -952,7 +993,8 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		// config written by the providers flow, so Settings used
 		// to show a blank base URL and "(none yet)" for the model
 		// even when a provider and key were saved.
-		"base_url": fc.activeProvider().BaseURL, "model": fc.activeProvider().Model, "user_name": fc.UserName,
+		"base_url": fc.activeProvider().BaseURL, "model": fc.activeProvider().Model, "user_name": func() string { n, _ := fc.savedUserName(); return n }(),
+		"version":        versionLabel(),
 		"api_key_masked": activeMasked, "api_key_source": activeSource,
 		"config_path": configPath(),
 		"provider":    fc.ActiveProvider, "providers": providers,
@@ -1072,6 +1114,14 @@ main{max-width:760px;margin:0 auto;padding:10px 28px 200px}
 .msg.user{align-self:flex-end;max-width:78%;background:var(--ink);color:var(--bg);padding:11px 16px;border-radius:20px 20px 6px 20px}
 .msg.muse{position:relative;padding-left:38px;max-width:100%}
 .msg.muse::before{content:"";position:absolute;left:0;top:1px;width:24px;height:24px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#fff 0,#f1e6d6 35%,#c9b49a 100%);box-shadow:inset 0 0 0 1px rgba(0,0,0,.06),0 2px 8px rgba(150,120,80,.25)}
+.ver{font-size:11px;font-weight:500;color:var(--muted);margin-left:6px;letter-spacing:.02em}
+.tok{display:block;font-size:11.5px;color:var(--muted);margin-top:6px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
+.modal .card{max-width:380px;width:100%;margin:0}
+.utable{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+.utable th,.utable td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+.utable th{color:var(--muted);font-weight:560}
+.utable td.n{text-align:right;font-variant-numeric:tabular-nums}
 .tools{display:inline-block;font-size:12px;color:var(--muted);margin-top:8px;background:var(--line2);padding:3px 10px;border-radius:999px;white-space:normal}
 #thinking{display:none;align-items:center;gap:10px;margin:14px 0 14px 38px;padding:12px 16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);font-size:13.5px;color:var(--ink2);width:fit-content}
 #thinking::before{content:"";width:12px;height:12px;border-radius:50%;border:2px solid var(--glow);border-top-color:var(--ink);animation:spin .8s linear infinite;display:inline-block;margin-right:8px;vertical-align:-1px}
@@ -1137,8 +1187,9 @@ h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
 .savebar{display:flex;align-items:center;gap:14px;margin-top:6px}
 @media (max-width:860px){:root{--side:0px}aside{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 14px}#chatlist{max-height:150px}.tabs{flex-direction:row;overflow-x:auto;border-top:0;padding-top:4px}.tabs button{white-space:nowrap}.me{display:none}.topbar{padding:10px 14px}.pill.addr,.pill.spark{display:none}main{padding:8px 16px 190px}.composer{left:0;padding:20px 14px 14px}.msg.user{max-width:90%}}
 </style></head><body>
+<div id="namebox" class="modal" style="display:none"><div class="card"><h3>What should I call you?</h3><p class="sub">I'll use this name from now on. You can change it any time in Settings.</p><input id="name-in" placeholder="Your name" autocomplete="given-name" maxlength="60"><div class="savebar" style="margin-top:12px"><button class="btn primary" onclick="saveFirstName()">Continue</button></div></div></div>
 <aside id="sidebar">
-<div class="brand"><span class="orb"></span>Muse99</div>
+<div class="brand"><span class="orb"></span>Muse99<span class="ver" id="ver"></span></div>
 <button class="newchat" onclick="newChat()">✎&nbsp; New chat</button>
 <input id="chat-search" placeholder="Search chats" oninput="loadChats()">
 <div class="sect">Chats</div>
@@ -1178,7 +1229,7 @@ h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
 <label class="check"><input id="set-shell" type="checkbox"> Allow shell commands</label>
 <p class="note">Shell lets Muse99 run commands on this server. Only turn it on in a folder you trust. It applies at once; port and SSL need a web UI restart from the SSH menu.</p>
 </div>
-<div class="card" id="usagebox"><h3>Usage</h3><p class="sub">Estimated at Spark rates.</p><span id="usage-detail">Loading…</span><div class="kv" id="settings" style="margin-top:10px"></div></div>
+<div class="card" id="usagebox"><h3>Usage</h3><p class="sub">Tokens per model. Cost is a rough estimate at Spark rates.</p><div id="usage-detail">Loading…</div><div class="kv" id="settings" style="margin-top:10px"></div></div>
 <div class="savebar"><button class="btn primary" onclick="saveSettings()">Save settings</button><span class="note" style="margin:0">Saved to ~/.muse99/config.json (600).</span></div></div>
 </main>
 <form id="f" class="composer"><div class="row"><input id="in" autocomplete="off" placeholder="Give Muse99 a task…"><button aria-label="Send">Send</button></div><div class="hint">Muse99 can run commands on this server while Shell is on.</div></form>
@@ -1198,9 +1249,14 @@ function tab(name,btn){document.querySelectorAll('.pane').forEach(p=>p.classList
 // longer invisible until you go back and check.
 async function refreshTaskBar(){try{const r=await fetch('/api/task');const j=await r.json();const bar=document.getElementById('taskbar');if(!j||!j.length){bar.style.display='none';return;}const t=j[j.length-1];if(t.status==='running'){bar.style.display='';bar.className='taskbar';bar.innerHTML='● Working in the background: <b>'+escapeHtml(t.goal)+'</b> — '+escapeHtml(t.summary||'started')+' <span class="muted">(tap to open Tasks)</span>';}else if(t.status==='failed'&&t.updated_at&&Date.now()-new Date(t.updated_at).getTime()<10*60*1000){bar.style.display='';bar.className='taskbar bad';bar.innerHTML='✗ Background task failed: <b>'+escapeHtml(t.goal)+'</b> — '+escapeHtml(t.summary||'')+' <span class="muted">(tap to open Tasks)</span>';}else{bar.style.display='none';}}catch(e){}}
 setInterval(refreshTaskBar,5000);refreshTaskBar();
-function add(t,cls,tools){const d=document.createElement('div');d.className='msg '+cls;d.textContent=t;if(tools&&tools.length){const x=document.createElement('div');x.className='tools';x.textContent='Tools: '+tools.join(' · ');d.appendChild(x);}chat.appendChild(d);window.scrollTo(0,document.body.scrollHeight);}
-add("Hey Takahashi, I'm Muse99 in your browser. Give me a task and I'll work it till the end — files, shell, tests, and verification.","muse");
-function fmtUsage(u){if(!u||!u.calls)return 'No tokens used yet';return u.prompt_tokens.toLocaleString()+' in / '+u.completion_tokens.toLocaleString()+' out · est. $'+Number(u.estimated_cost_usd).toFixed(4)+' (Spark rates)';}
+function add(t,cls,tools,usage){const d=document.createElement('div');d.className='msg '+cls;d.textContent=t;if(tools&&tools.length){const x=document.createElement('div');x.className='tools';x.textContent='Tools: '+tools.join(' · ');d.appendChild(x);}const ut=fmtTok(usage);if(ut){const y=document.createElement('span');y.className='tok';y.textContent=ut;d.appendChild(y);}chat.appendChild(d);window.scrollTo(0,document.body.scrollHeight);}
+let welcomed=false;
+function welcome(name){if(welcomed||(chat.children&&chat.children.length))return;welcomed=true;add((name?'Hey '+name+', ':'Hey, ')+"I'm Muse99 in your browser. Give me a task and I'll work it till the end — files, shell, tests, and verification.","muse");}
+async function saveFirstName(){const n=document.getElementById('name-in').value.trim();if(!n){document.getElementById('name-in').focus();return;}await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_name:n})});document.getElementById('namebox').style.display='none';await loadStatus();}
+document.getElementById('name-in').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();saveFirstName();}});
+function fmtTok(u){if(!u||!u.calls)return '';return u.total_tokens.toLocaleString()+' tokens ('+u.prompt_tokens.toLocaleString()+' in / '+u.completion_tokens.toLocaleString()+' out)'+(u.model?' · '+u.model:'');}
+function fmtUsage(u){if(!u||!u.calls)return 'No tokens used yet';return u.total_tokens.toLocaleString()+' tokens'+(u.last_model?' · '+u.last_model:'');}
+function usageTable(u){const rows=(u&&u.by_model)||[];if(!rows.length)return '';return '<table class="utable"><tr><th>Model</th><th>Provider</th><th class="n">In</th><th class="n">Out</th><th class="n">Total</th><th class="n">Calls</th></tr>'+rows.map(m=>'<tr><td>'+escapeHtml(m.model)+'</td><td>'+escapeHtml(m.provider||'')+'</td><td class="n">'+m.prompt_tokens.toLocaleString()+'</td><td class="n">'+m.completion_tokens.toLocaleString()+'</td><td class="n">'+m.total_tokens.toLocaleString()+'</td><td class="n">'+m.calls.toLocaleString()+'</td></tr>').join('')+'</table>';}
 loadStatus();
 let currentChatId=null;
 async function loadChats(){const q=document.getElementById('chat-search').value.trim();const r=await fetch('/api/chats'+(q?'?q='+encodeURIComponent(q):''));const j=await r.json();const list=document.getElementById('chatlist');list.innerHTML=(j||[]).map(c=>'<div class="chatitem'+(c.id===currentChatId?' active':'')+'" onclick="openChat(\''+c.id+'\')"><span>'+escapeHtml(c.title||'Chat')+'</span><button title="Rename" onclick="event.stopPropagation();renameChat(\''+c.id+'\',\''+escapeHtml(c.title||'').replace(/'/g,'')+'\')">✎</button><button title="Delete" onclick="event.stopPropagation();deleteChat(\''+c.id+'\')">✕</button></div>').join('')||'<div class="empty">(no chats yet)</div>';}
@@ -1213,9 +1269,9 @@ async function loadMemories(){const r=await fetch('/api/memories');const j=await
 async function deleteMemory(id){await fetch('/api/memories/'+id,{method:'DELETE'});loadMemories();}
 async function summariseChat(){const r=await fetch('/api/chats/'+(currentChatId||'')+'/summarise',{method:'POST'});const j=await r.json();alert('Saved '+(j.saved||0)+' new fact(s) to memory.');loadMemories();}
 async function toggleShell(){const on=document.getElementById('shell-toggle').checked;await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow_shell:on})});document.getElementById('shellbox').classList.toggle('on',on);loadStatus();}
-async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;document.getElementById('model').textContent=s.model;{const mn=document.getElementById('me-name');if(mn&&s.user)mn.textContent=s.user;const av=document.querySelector?document.querySelector('.me .av'):null;if(av&&s.user)av.textContent=s.user.trim().charAt(0).toUpperCase();}if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);const nk=document.getElementById('nokey');if(nk){nk.style.display=s.api_key_set?'none':'block';}const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
+async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;document.getElementById('model').textContent=s.model;{const mn=document.getElementById('me-name');if(mn&&s.user)mn.textContent=s.user;const av=document.querySelector?document.querySelector('.me .av'):null;if(av&&s.user)av.textContent=s.user.trim().charAt(0).toUpperCase();}if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);{const v=document.getElementById('ver');if(v)v.textContent=s.version||'';}if(s.name_needed){const nb=document.getElementById('namebox');if(nb.style.display==='none'){nb.style.display='flex';setTimeout(()=>document.getElementById('name-in').focus(),50);}}else{welcome(s.user);}const nk=document.getElementById('nokey');if(nk){nk.style.display=s.api_key_set?'none':'block';}const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
 loadChats();
-document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;add(v,'user');inp.value='';think.style.display='block';try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';add(j.reply||j.error||'(no reply)','muse',j.tools);}catch(err){think.style.display='none';add('Could not reach server: '+err,'muse');}});
+document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;add(v,'user');inp.value='';think.style.display='block';try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';add(j.reply||j.error||'(no reply)','muse',j.tools,j.usage);loadStatus();}catch(err){think.style.display='none';add('Could not reach server: '+err,'muse');}});
 async function clearChat(){await fetch('/api/clear',{method:'POST'});chat.innerHTML='';add('Chat cleared. Memory is kept.','muse');}
 async function loadFiles(p){const r=await fetch('/api/files?path='+encodeURIComponent(p||''));const j=await r.json();document.getElementById('filelist').innerHTML=j.files.map(f=>'<div class="card" style="cursor:pointer;padding:12px 16px" onclick="viewFile(\''+f.path.replace(/'/g,'')+'\','+f.dir+')">'+(f.dir?'📁 ':'📄 ')+f.name+'</div>').join('')||'<div class="empty">(empty)</div>';}
 async function viewFile(p,isDir){if(isDir){loadFiles(p);return;}const r=await fetch('/api/file?path='+encodeURIComponent(p));const j=await r.json();document.getElementById('fileview').textContent=j.content||'(empty)';}
@@ -1260,7 +1316,7 @@ let pendingKeys={};let currentSettingsProvider='';
 // (unsaved) key for it, or an empty box whose placeholder shows the
 // saved key's masked ending for THIS provider only.
 function setKeyField(provider,masked){const k=document.getElementById('set-key');k.value=pendingKeys[provider]||'';k.placeholder=masked?('Key saved ('+masked+') — leave blank to keep it'):'API key';}
-async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+' ('+(j.api_key_source||'none')+')<br>Config: '+j.config_path;document.getElementById('usage-detail').textContent=fmtUsage(j.usage)+(j.usage&&j.usage.last_label?' — last: '+j.usage.last_prompt_tokens.toLocaleString()+' in / '+j.usage.last_completion_tokens.toLocaleString()+' out ('+j.usage.last_label+')':'')+' · '+((j.usage&&j.usage.calls)||0)+' API calls';const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+p.name+'">'+p.name+' — '+p.model+'</option>').join('');sel.value=j.provider||'spark';currentSettingsProvider=sel.value;const ap=(j.providers||[]).find(x=>x.name===sel.value);setKeyField(sel.value,ap?ap.api_key_masked:'');document.getElementById('set-base').value=j.base_url||'';activeModel=j.model||'';document.getElementById('active-model').textContent=j.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(j.api_key_masked||'(not set)')+(j.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':j.api_key_source==='saved'?' — saved in config.json':'');document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||3759;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{pendingKeys[currentSettingsProvider]=document.getElementById('set-key').value;const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';activeModel=p.model||'';document.getElementById('active-model').textContent=p.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(p.api_key_masked||'(not set)')+(p.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':p.api_key_source==='saved'?' — saved in config.json':'');currentSettingsProvider=sel.value;setKeyField(sel.value,p.api_key_masked||'');}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}}
+async function loadSettings(){const r=await fetch('/api/settings');const j=await r.json();settingsData=j;document.getElementById('settings').innerHTML='Base: '+(j.base_url||'')+'<br>Model: '+(j.model||'')+'<br>User: '+(j.user_name||'')+'<br>Key: '+(j.api_key_masked||'(not set)')+' ('+(j.api_key_source||'none')+')<br>Config: '+j.config_path+'<br>Version: '+escapeHtml(j.version||'');{const u=j.usage||{};document.getElementById('usage-detail').innerHTML=(u.calls?escapeHtml(u.prompt_tokens.toLocaleString()+' in / '+u.completion_tokens.toLocaleString()+' out · '+u.calls.toLocaleString()+' API calls · est. $'+Number(u.estimated_cost_usd).toFixed(4)+' (Spark rates)')+(u.last_total_tokens?'<br>Last call: '+escapeHtml(u.last_total_tokens.toLocaleString()+' tokens'+(u.last_model?' · '+u.last_model:'')+(u.last_label?' ('+u.last_label+')':'')):''):'No tokens used yet')+usageTable(u);}const sel=document.getElementById('set-provider');sel.innerHTML=(j.providers||[]).map(p=>'<option value="'+escapeHtml(p.name)+'">'+escapeHtml(p.name)+(p.model?' — '+escapeHtml(p.model):'')+(p.api_key_source==='none'?'':' · key saved')+'</option>').join('')+'<option value="__new">+ Add a provider (your own name)…</option>';sel.value=j.provider||'spark';currentSettingsProvider=sel.value;const ap=(j.providers||[]).find(x=>x.name===sel.value);setKeyField(sel.value,ap?ap.api_key_masked:'');document.getElementById('set-base').value=j.base_url||'';activeModel=j.model||'';document.getElementById('active-model').textContent=j.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(j.api_key_masked||'(not set)')+(j.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':j.api_key_source==='saved'?' — saved in config.json':'');document.getElementById('set-user').value=j.user_name||'';document.getElementById('set-port').value=j.port||3759;document.getElementById('set-domain').value=j.domain||'';document.getElementById('set-tls').checked=!!j.tls_enabled;document.getElementById('set-shell').checked=!!j.allow_shell;sel.onchange=()=>{pendingKeys[currentSettingsProvider]=document.getElementById('set-key').value;if(sel.value==='__new'){const nm=(prompt('Name for this API (for example glm, deepseek, my-openrouter). Letters, digits, - _ . only.')||'').trim();if(!/^[A-Za-z0-9._-]{1,40}$/.test(nm)){sel.value=currentSettingsProvider;if(nm)alert('Use letters, digits, - _ . only (max 40).');return;}if(!(j.providers||[]).find(x=>x.name===nm)){(j.providers=j.providers||[]).push({name:nm,base_url:'',model:'',api_key_masked:'(not set)',api_key_source:'none'});const o=document.createElement('option');o.value=nm;o.textContent=nm;sel.insertBefore(o,sel.lastElementChild);}sel.value=nm;}const p=(j.providers||[]).find(x=>x.name===sel.value);if(p){document.getElementById('set-base').value=p.base_url||'';activeModel=p.model||'';document.getElementById('active-model').textContent=p.model||'(none yet — fetch models and set one active)';document.getElementById('key-source').textContent='Key in use: '+(p.api_key_masked||'(not set)')+(p.api_key_source==='env'?' — from the environment, press Save settings to keep it in config.json':p.api_key_source==='saved'?' — saved in config.json':'');currentSettingsProvider=sel.value;setKeyField(sel.value,p.api_key_masked||'');}refreshModelList();};if(j.models&&j.models.length){fillModelList(j.models,j.models_source||'cached',j.models_fetched_at);}else{modelStatus('No models fetched yet for this provider — press Fetch models.','');}}
 async function saveSettings(){const b={active_provider:document.getElementById('set-provider').value,base_url:document.getElementById('set-base').value,api_key:document.getElementById('set-key').value,user_name:document.getElementById('set-user').value,port:parseInt(document.getElementById('set-port').value||'3759'),domain:document.getElementById('set-domain').value,tls_enabled:document.getElementById('set-tls').checked,allow_shell:document.getElementById('set-shell').checked};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});delete pendingKeys[b.active_provider];document.getElementById('set-key').value='';alert('Saved — restart the web UI from the SSH menu if you changed the port or SSL.');loadSettings();loadStatus();}
 </script></body></html>
 `

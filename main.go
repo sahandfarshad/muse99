@@ -28,6 +28,10 @@ type Config struct {
 	CertFile   string
 	KeyFile    string
 	UserName   string
+	// NameSet is true once the user told us their name (first-run
+	// question in the web UI / SSH menu, Settings, or --user /
+	// MUSE_USER_NAME). Until then the UI asks for it.
+	NameSet    bool
 	MemoryPath string
 	Workdir    string
 	AllowShell bool
@@ -72,7 +76,7 @@ func loadConfig() Config {
 	flag.StringVar(&cfg.BaseURL, "base-url", envOr("MODEL_API_BASE_URL", "https://api.meta.ai/v1"), "API base URL (OpenAI-compatible)")
 	flag.StringVar(&cfg.APIKey, "api-key", envOr("MODEL_API_KEY", os.Getenv("OPENAI_API_KEY")), "API key (or MODEL_API_KEY env)")
 	flag.StringVar(&cfg.Model, "model", envOr("MODEL_ID", "muse-spark-1.3"), "Model ID")
-	flag.StringVar(&cfg.UserName, "user", envOr("MUSE_USER_NAME", "Takahashi"), "User's name")
+	flag.StringVar(&cfg.UserName, "user", envOr("MUSE_USER_NAME", ""), "User's name (asked on first run when not set)")
 	flag.StringVar(&cfg.MemoryPath, "memory", os.Getenv("MUSE_MEMORY"), "Path to MEMORY.md")
 	flag.StringVar(&cfg.Workdir, "workdir", envOr("MUSE_WORKDIR", mustCwd()), "Working directory for file/shell tools")
 	flag.StringVar(&cfg.Prompt, "prompt", "", "Single prompt, then exit (non-interactive)")
@@ -100,6 +104,16 @@ func loadConfig() Config {
 		os.Getenv("MODEL_ID") != "" || os.Getenv("OPENAI_API_KEY") != ""
 	foldEnvIntoConfig(&cfg, &fc, explicit, envSet)
 	applyFileConfig(&cfg, fc)
+	// A name given on the command line or in MUSE_USER_NAME wins.
+	if explicit["user"] || strings.TrimSpace(os.Getenv("MUSE_USER_NAME")) != "" {
+		if n := cleanUserName(envOr("MUSE_USER_NAME", "")); n != "" && !explicit["user"] {
+			cfg.UserName = n
+		}
+		if explicit["user"] {
+			cfg.UserName = cleanUserName(cfg.UserName)
+		}
+		cfg.NameSet = cfg.UserName != ""
+	}
 	// --allow-shell on the command line wins over the saved setting;
 	// otherwise the saved checkbox value (from the web UI / menu) applies.
 	if flagAllowShell {
@@ -158,6 +172,12 @@ func mustCwd() string {
 }
 
 func main() {
+	for _, a := range os.Args[1:] {
+		if a == "--version" || a == "-version" || a == "version" {
+			fmt.Println("muse99", versionLabel())
+			return
+		}
+	}
 	cfg := loadConfig()
 	// Uninstall runs before anything else — no API key, no DB needed.
 	if cfg.Uninstall {
@@ -312,6 +332,7 @@ func refreshSystemFor(cfg *Config, messages *[]Message, input string) {
 	if len(*messages) == 0 || (*messages)[0].Role != "system" {
 		return
 	}
+	syncUserName(cfg)
 	ctx := memoryContextFor(input, cfg.MemoryPath)
 	(*messages)[0].Content = systemPrompt(cfg.UserName, ctx, cfg.BaseURL, cfg.Model)
 }

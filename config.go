@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -33,6 +35,7 @@ type FileConfig struct {
 	APIKey         string              `json:"api_key,omitempty"`
 	Model          string              `json:"model,omitempty"`
 	UserName       string              `json:"user_name,omitempty"`
+	NameSet        bool                `json:"name_set,omitempty"`
 	Workdir        string              `json:"workdir,omitempty"`
 	Port           int                 `json:"port,omitempty"`
 	Domain         string              `json:"domain,omitempty"`
@@ -210,7 +213,10 @@ func configFromRuntime(cfg Config) FileConfig {
 	fc.BaseURL = cfg.BaseURL
 	fc.Model = cfg.Model
 	fc.APIKey = cfg.APIKey
-	fc.UserName = cfg.UserName
+	if cfg.NameSet {
+		fc.UserName = cfg.UserName
+		fc.NameSet = true
+	}
 	fc.Workdir = cfg.Workdir
 	fc.Port = cfg.WebPort
 	fc.Domain = cfg.Domain
@@ -257,8 +263,9 @@ func applyFileConfig(cfg *Config, fc FileConfig) {
 	}
 	cfg.Provider = fc.ActiveProvider
 	cfg.Providers = fc.Providers
-	if fc.UserName != "" {
-		cfg.UserName = fc.UserName
+	if n, ok := fc.savedUserName(); ok {
+		cfg.UserName = n
+		cfg.NameSet = true
 	}
 	if fc.Port != 0 {
 		cfg.WebPort = fc.Port
@@ -366,4 +373,93 @@ func indexOf(s, sep string) int {
 		}
 	}
 	return -1
+}
+
+// legacyDefaultName is the name older versions saved for everyone.
+// A config that only has it was never told the user's real name.
+const legacyDefaultName = "Takahashi"
+
+// savedUserName returns the name the user told us, if any. Configs
+// from before v0.8 saved the default "Takahashi" without asking; that
+// one does not count, so the user is asked once.
+func (fc FileConfig) savedUserName() (string, bool) {
+	n := cleanUserName(fc.UserName)
+	if n == "" {
+		return "", false
+	}
+	if fc.NameSet || n != legacyDefaultName {
+		return n, true
+	}
+	return "", false
+}
+
+// cleanUserName trims a name and caps it at 60 characters.
+func cleanUserName(n string) string {
+	n = strings.Join(strings.Fields(n), " ")
+	if r := []rune(n); len(r) > 60 {
+		n = string(r[:60])
+	}
+	return n
+}
+
+// setUserName saves the user's name to config.json (and cfg).
+func setUserName(cfg *Config, name string) error {
+	name = cleanUserName(name)
+	if name == "" {
+		return fmt.Errorf("name is empty")
+	}
+	fc := loadFileConfig()
+	fc.UserName = name
+	fc.NameSet = true
+	if err := saveFileConfig(fc); err != nil {
+		return err
+	}
+	if cfg != nil {
+		cfg.UserName = name
+		cfg.NameSet = true
+	}
+	return nil
+}
+
+// syncUserName picks up a name changed by the other process (the SSH
+// menu and the web UI run separately and share config.json).
+func syncUserName(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if n, ok := loadFileConfig().savedUserName(); ok {
+		cfg.UserName = n
+		cfg.NameSet = true
+	}
+}
+
+// providerNamesFor is the presets, then any extra providers the user
+// added under their own name (e.g. "glm", "deepseek"), sorted.
+func providerNamesFor(fc FileConfig) []string {
+	names := providerPresetNames()
+	seen := map[string]bool{}
+	for _, n := range names {
+		seen[n] = true
+	}
+	extra := []string{}
+	for n := range fc.Providers {
+		if !seen[n] && validProviderName(n) {
+			extra = append(extra, n)
+		}
+	}
+	sort.Strings(extra)
+	return append(names, extra...)
+}
+
+// validProviderName allows short names of letters, digits, - _ . only.
+func validProviderName(n string) bool {
+	if n == "" || len(n) > 40 {
+		return false
+	}
+	for _, c := range n {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
 }

@@ -398,7 +398,7 @@ func TestAutoSummaryDedupe(t *testing.T) {
 
 func TestShellCheckboxToggle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), AllowShell: false}
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), AllowShell: false}
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md", allowShell: false}
 	s := &webServer{client: NewClient("http://localhost:9", "x", "m"), runner: runner, cfg: cfg,
 		messages: []Message{{Role: "system", Content: "s"}}, system: "s"}
@@ -504,7 +504,7 @@ func TestWebChatsPersistAcrossRestart(t *testing.T) {
 	defer mock.Close()
 
 	newServer := func() *webServer {
-		cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), MemoryPath: t.TempDir() + "/MEMORY.md"}
+		cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), MemoryPath: t.TempDir() + "/MEMORY.md"}
 		runner := &toolRunner{workdir: cfg.Workdir, memoryPath: cfg.MemoryPath}
 		s := &webServer{client: NewClient(mock.URL, "x", "m"), runner: runner, cfg: cfg,
 			messages: []Message{{Role: "system", Content: "s"}}, system: "s", db: db}
@@ -746,7 +746,7 @@ func TestModelsHandler(t *testing.T) {
 	// Keep the URL around; the server is closed later to test fallback.
 	mockURL := mock.URL
 
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "mock",
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), Provider: "mock",
 		Providers: map[string]Provider{"mock": {Name: "mock", BaseURL: mockURL, Model: "model-a", APIKey: "test-key-123"}}}
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
 	s := &webServer{client: NewClient(mockURL, "test-key-123", "model-a"), runner: runner, cfg: cfg,
@@ -817,7 +817,7 @@ func TestModelTestHandler(t *testing.T) {
 	mock := mockProviderServer(t, []string{"model-a"}, "OK", false)
 	defer mock.Close()
 
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "mock",
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), Provider: "mock",
 		Providers: map[string]Provider{"mock": {Name: "mock", BaseURL: mock.URL, Model: "model-a", APIKey: "test-key-123"}}}
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
 	s := &webServer{client: NewClient(mock.URL, "test-key-123", "model-a"), runner: runner, cfg: cfg,
@@ -874,7 +874,7 @@ func TestModelTestHandler(t *testing.T) {
 func TestModelSelectSaves(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearModelCache()
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "mock",
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), Provider: "mock",
 		Providers: map[string]Provider{"mock": {Name: "mock", BaseURL: "http://localhost:9", Model: "model-a", APIKey: "test-key-123"}}}
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
 	s := &webServer{client: NewClient("http://localhost:9", "test-key-123", "model-a"), runner: runner, cfg: cfg,
@@ -997,7 +997,7 @@ func TestUninstallRemovesDataWithOptIn(t *testing.T) {
 
 func TestNoAPIKeyChatNotice(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), APIKey: ""}
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), APIKey: ""}
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
 	// The client points nowhere — the notice must come back without
 	// any API call being attempted.
@@ -1213,7 +1213,7 @@ func TestModelActiveEndpoint(t *testing.T) {
 	clearModelCache()
 	mock := mockProviderServer(t, []string{"model-a", "model-b"}, "OK", false)
 	defer mock.Close()
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "mock",
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), Provider: "mock",
 		Providers: map[string]Provider{"mock": {Name: "mock", BaseURL: mock.URL, Model: "model-a", APIKey: "test-key-123"}}}
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
 	s := &webServer{client: NewClient(mock.URL, "test-key-123", "model-a"), runner: runner, cfg: cfg,
@@ -1303,7 +1303,7 @@ func TestKeySourceAndSavePreservesEnvKey(t *testing.T) {
 	fc := loadFileConfig()
 	fc.setProvider(Provider{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "gemini-2.5-flash", APIKey: ""})
 	_ = saveFileConfig(fc)
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "gemini", APIKey: "env-key-xyz",
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), Provider: "gemini", APIKey: "env-key-xyz",
 		Providers: map[string]Provider{"gemini": {Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "gemini-2.5-flash", APIKey: "env-key-xyz"}}}
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
 	s := &webServer{client: NewClient(cfg.BaseURL, cfg.APIKey, cfg.Model), runner: runner, cfg: cfg,
@@ -1356,7 +1356,7 @@ func TestSettingsShowsActiveProvider(t *testing.T) {
 	fc.ActiveProvider = "spark"
 	fc.BaseURL, fc.Model, fc.APIKey = "", "", ""
 	_ = saveFileConfig(fc)
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", APIKey: "spark-key-9999",
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", APIKey: "spark-key-9999",
 		Providers: map[string]Provider{"spark": {Name: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", APIKey: "spark-key-9999"}}}
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
 	s := &webServer{client: NewClient(cfg.BaseURL, cfg.APIKey, cfg.Model), runner: runner, cfg: cfg,
@@ -1422,7 +1422,7 @@ func TestPromptZeroCancels(t *testing.T) {
 // TestMenuExitZero: 0 exits the SSH menu at once.
 func TestMenuExitZero(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", WebPort: 3759, WebAddr: "127.0.0.1"}
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3", WebPort: 3759, WebAddr: "127.0.0.1"}
 	client := NewClient(cfg.BaseURL, "", cfg.Model)
 	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: t.TempDir() + "/MEMORY.md"}
 	ctrl := newWebController(cfg, client, runner, toolDefinitions(), "s")
@@ -1520,7 +1520,7 @@ func TestWebStartBindBeforePrint(t *testing.T) {
 		t.Fatal(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	cfg := Config{UserName: "Takahashi", Workdir: t.TempDir(), WebAddr: "127.0.0.1", WebPort: port, Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3"}
+	cfg := Config{UserName: "Takahashi", NameSet: true, Workdir: t.TempDir(), WebAddr: "127.0.0.1", WebPort: port, Provider: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3"}
 	ctrl := newWebController(cfg, NewClient(cfg.BaseURL, "", cfg.Model), &toolRunner{workdir: cfg.Workdir, memoryPath: filepath.Join(t.TempDir(), "MEMORY.md")}, nil, "s")
 
 	out := captureStdout(t, func() {

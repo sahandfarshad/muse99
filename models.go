@@ -413,6 +413,15 @@ func getModels(baseURL, apiKey, provider string, force bool) (cachedModelList, e
 			return c, nil
 		}
 		modelCacheMu.Unlock()
+		// v0.8: a list fetched before is kept per provider endpoint —
+		// switching providers shows it at once instead of making the
+		// user fetch again. "Fetch models" (force) still goes live.
+		if appDB != nil {
+			if saved, ok := appDB.LoadModelList(baseURL); ok && len(saved.Models) > 0 {
+				saved.Source = "cached"
+				return saved, nil
+			}
+		}
 	}
 	models, source, err := fetchModelsLive(baseURL, apiKey, provider)
 	if err != nil {
@@ -488,11 +497,8 @@ func testModel(baseURL, apiKey, model, provider string) (reply string, latencyMs
 func resolveModelTarget(cfg *Config, provider, baseURL, apiKey string) (base, key, name string) {
 	name = strings.TrimSpace(provider)
 	if name != "" {
-		if cfg != nil && cfg.Providers != nil {
-			if p, ok := cfg.Providers[name]; ok {
-				base, key = p.BaseURL, p.APIKey
-			}
-		}
+		p := mergedProvider(cfg, name)
+		base, key = p.BaseURL, p.APIKey
 		if base == "" {
 			if preset, ok := providerPreset(name); ok {
 				base = preset.BaseURL
@@ -513,4 +519,37 @@ func resolveModelTarget(cfg *Config, provider, baseURL, apiKey string) (base, ke
 		return cfg.BaseURL, cfg.APIKey, cfg.Provider
 	}
 	return "", "", ""
+}
+
+// mergedProvider is the provider entry to use for name: the saved
+// entry in config.json wins (it is what Settings / Set active wrote
+// last), and the live entry fills what it lacks (a key that came from
+// the environment and was never saved). Before v0.8 the live copy won,
+// so a key saved from Settings was not seen until a restart and the
+// user had to type it again after switching providers.
+func mergedProvider(cfg *Config, name string) Provider {
+	p := Provider{Name: name}
+	if cfg != nil && cfg.Providers != nil {
+		if live, ok := cfg.Providers[name]; ok {
+			p = live
+		}
+	}
+	if saved, ok := loadFileConfig().Providers[name]; ok {
+		if saved.BaseURL != "" {
+			p.BaseURL = saved.BaseURL
+		}
+		if saved.APIKey != "" {
+			p.APIKey = saved.APIKey
+		}
+		if saved.Model != "" {
+			p.Model = saved.Model
+		}
+	}
+	if p.BaseURL == "" {
+		if preset, ok := providerPreset(name); ok {
+			p.BaseURL = preset.BaseURL
+		}
+	}
+	p.Name = name
+	return p
 }

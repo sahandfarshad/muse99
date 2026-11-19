@@ -61,6 +61,9 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 			EstimatedCostUSD: estimatedCost(u.PromptTokens-startUsage.PromptTokens, u.CompletionTokens-startUsage.CompletionTokens),
 		}
 		line := fmt.Sprintf("Tokens: %s in / %s out, est. $%.4f", formatInt(delta.PromptTokens), formatInt(delta.CompletionTokens), delta.EstimatedCostUSD)
+		if m := diffUsage(startUsage, u).Model; m != "" {
+			line += " · model: " + m
+		}
 		// No Println here: main prints the returned string in CLI mode,
 		// and printing here too would show the line twice.
 		return result + "\n" + line

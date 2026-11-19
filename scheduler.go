@@ -15,9 +15,9 @@ import (
 // no cron needed, but you can also use cron to call `muse99 --prompt "..."`.
 
 type Scheduled struct {
-	Time   string `json:"time"` // HH:MM, local time
-	Prompt string `json:"prompt"`
-	Days   string `json:"days,omitempty"`
+	Time    string `json:"time"` // HH:MM, local time
+	Prompt  string `json:"prompt"`
+	Days    string `json:"days,omitempty"`
 	LastRun string `json:"last_run,omitempty"`
 }
 

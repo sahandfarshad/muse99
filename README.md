@@ -37,10 +37,10 @@ Just run `muse99` over SSH:
 
 ```
 ═══════════════════════════════════════════════════════════
-  ✦ Muse99  —  Web UI: http://192.168.1.10:3759
+  ✦ Muse99 v0.8.0  —  Web UI: http://192.168.1.10:3759
   Status: web UI is RUNNING  ·  open the address above in your browser
   Provider: spark  ·  Model: muse-spark-1.3  ·  Muse Spark — Muse mode
-  User: Takahashi  ·  Workdir: /home/ubuntu
+  User: Sahand  ·  Workdir: /home/ubuntu
 ═══════════════════════════════════════════════════════════
 
   1  Start web UI
@@ -50,7 +50,7 @@ Just run `muse99` over SSH:
   5  Choose web port
   6  Set domain
   7  Set up SSL / Let's Encrypt
-  8  Update Muse99
+  8  Update / roll back (now v0.8.0)
   9  Providers / API keys
   10 Show memory
   11 Show usage
@@ -58,9 +58,12 @@ Just run `muse99` over SSH:
   13 Chats
   14 Toggle shell commands
   15 Web login (username / password)
+  17 Your name
   16 Uninstall Muse99
   0  Exit
 ```
+
+The version you run is always on the top line (and next to the logo in the web UI; `muse99 --version` prints it). The first time you open the menu or the web UI, Muse99 asks what to call you and uses that name from then on; change it with option 17 or in web Settings → Your name.
 
 **0 is the exit**, and 0 also cancels out of any prompt inside the menu (a port, a domain, a password) instead of being taken as the value. The web UI started from the menu runs as its own process, so it keeps serving after you quit the menu.
 
@@ -170,7 +173,7 @@ Then ask it to run something there with the `remote_shell` tool. It uses your sy
 
 ## Any API — providers
 
-Muse99 keeps a key per provider, so switching back restores the right key. Add and switch providers in the SSH menu (option 9) or in web Settings — no need to edit config by hand. The old env vars still work as the first provider.
+Muse99 keeps a key per provider, so switching back restores the right key — and its fetched model list, so you don't fetch again. A key is saved under the provider's name as soon as Fetch models works with it. You can also add your own named providers (Settings → Provider → **+ Add a provider**, e.g. `glm`, `deepseek`), each with its own base URL, key and model. Add and switch providers in the SSH menu (option 9) or in web Settings — no need to edit config by hand. The old env vars still work as the first provider.
 
 | Provider | Base URL | Default model |
 |---|---|---|
@@ -192,7 +195,9 @@ Config order: `~/.muse99/config.json` → `.env` → env vars → flags. The con
 Every API reply reports its tokens, and Muse99 adds them up in `~/.muse99/data/usage.json`. You can see them in three places:
 
 - The SSH menu header (all-time totals), or menu option 11 (Show usage) for the full breakdown.
-- The web UI header, and the Settings tab (total in/out, estimated cost, last task's tokens).
+- Under every chat reply: the tokens that reply used and the model that answered (e.g. `1,234 tokens (1,100 in / 134 out) · glm-5.3-flash`).
+- The web UI header (total + last model), and the Settings tab: totals plus a table of tokens **per model**.
+- Menu option 11 shows the same per-model table. (Per-model counts start with v0.8; older calls are only in the totals.)
 - At the end of every autonomous `--task` run: `Tokens: 1,234 in / 567 out, est. $0.0040`.
 
 Cost is an estimate at Spark rates — $1.25 per 1M input tokens, $4.25 per 1M output tokens. Other providers are estimated at the same rates (their real prices differ, so treat it as a rough guide). Ollama runs locally, so its API cost is $0, but its tokens are still counted. If a provider does not report usage, that call is simply not counted.
@@ -205,7 +210,7 @@ The Let's Encrypt private key is root-only, so Muse99 copies the pair into `~/.m
 
 ## Updating
 
-In the SSH menu, option 8 (Update Muse99) downloads the latest release binary, checks it runs `--help`, then replaces the current binary — and **restarts the web UI from the new binary**, so the update actually takes effect. Or just run the one-line installer again — it does the same thing, and also restarts the web UI if it was already running. (The menu itself is still the old version until you quit with 0 and run `muse99` again.)
+In the SSH menu, option 8 (Update / roll back) shows the version you are on and the latest release, and offers: **1** update to the latest, **2** roll back to the previous version, **3** install any version by tag (e.g. `v0.7.2`). Every update keeps the binary it replaces as `muse99.prev`, so roll back is one step (and rolling back again returns to the newer one). It downloads the release binary, checks it runs `--help`, then replaces the current binary — and **restarts the web UI from the new binary**, so the update actually takes effect. Or just run the one-line installer again — it does the same thing, and also restarts the web UI if it was already running. (The menu itself is still the old version until you quit with 0 and run `muse99` again.)
 
 ## Uninstalling
 

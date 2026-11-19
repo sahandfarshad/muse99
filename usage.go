@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +38,21 @@ type UsageTotals struct {
 	LastLabel        string    `json:"last_label,omitempty"`
 	EstimatedCostUSD float64   `json:"estimated_cost_usd"`
 	UpdatedAt        time.Time `json:"updated_at"`
+	// v0.8: which model the last call used, and totals per model
+	// (key = model id as sent to the provider).
+	LastModel string                 `json:"last_model,omitempty"`
+	ByModel   map[string]*ModelUsage `json:"by_model,omitempty"`
+}
+
+// ModelUsage is the token count for one model.
+type ModelUsage struct {
+	Model            string    `json:"model"`
+	Provider         string    `json:"provider,omitempty"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	TotalTokens      int       `json:"total_tokens"`
+	Calls            int       `json:"calls"`
+	LastUsed         time.Time `json:"last_used"`
 }
 
 var (
@@ -79,6 +96,12 @@ func setUsageLabel(label string) {
 // It is a no-op when the provider reported no usage (some local models
 // do not return a usage block).
 func recordUsage(prompt, completion int) UsageTotals {
+	return recordUsageFor("", "", prompt, completion)
+}
+
+// recordUsageFor is recordUsage tagged with the model (and provider)
+// that answered, so usage can be shown per model.
+func recordUsageFor(provider, model string, prompt, completion int) UsageTotals {
 	usageMu.Lock()
 	defer usageMu.Unlock()
 	u := loadUsage()
@@ -93,6 +116,25 @@ func recordUsage(prompt, completion int) UsageTotals {
 	u.LastCompletion = completion
 	u.LastTotal = prompt + completion
 	u.LastLabel = usageLabel
+	u.LastModel = model
+	if model != "" {
+		if u.ByModel == nil {
+			u.ByModel = map[string]*ModelUsage{}
+		}
+		m := u.ByModel[model]
+		if m == nil {
+			m = &ModelUsage{Model: model}
+			u.ByModel[model] = m
+		}
+		if provider != "" {
+			m.Provider = provider
+		}
+		m.PromptTokens += prompt
+		m.CompletionTokens += completion
+		m.TotalTokens += prompt + completion
+		m.Calls++
+		m.LastUsed = time.Now()
+	}
 	u.EstimatedCostUSD = estimatedCost(u.PromptTokens, u.CompletionTokens)
 	u.UpdatedAt = time.Now()
 	_ = saveJSON("usage.json", u)
@@ -119,7 +161,60 @@ func usageTotalsJSON() map[string]any {
 		"estimated_cost_usd": u.EstimatedCostUSD,
 		"last_prompt_tokens": u.LastPromptTokens, "last_completion_tokens": u.LastCompletion,
 		"last_total_tokens": u.LastTotal, "last_label": u.LastLabel,
+		"last_model": u.LastModel, "by_model": modelUsageList(u),
 	}
+}
+
+// modelUsageList returns per-model totals, most tokens first.
+func modelUsageList(u UsageTotals) []ModelUsage {
+	out := []ModelUsage{}
+	for _, m := range u.ByModel {
+		if m != nil {
+			out = append(out, *m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TotalTokens != out[j].TotalTokens {
+			return out[i].TotalTokens > out[j].TotalTokens
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out
+}
+
+// usageDelta is what was used between two snapshots, e.g. one chat
+// reply or one task: tokens, calls, and the model(s) that answered.
+type usageDelta struct {
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+	Calls            int    `json:"calls"`
+	Model            string `json:"model,omitempty"`
+}
+
+func diffUsage(before, after UsageTotals) usageDelta {
+	d := usageDelta{
+		PromptTokens:     after.PromptTokens - before.PromptTokens,
+		CompletionTokens: after.CompletionTokens - before.CompletionTokens,
+		TotalTokens:      after.TotalTokens - before.TotalTokens,
+		Calls:            after.Calls - before.Calls,
+	}
+	models := []string{}
+	for name, m := range after.ByModel {
+		var prev int
+		if b := before.ByModel[name]; b != nil {
+			prev = b.Calls
+		}
+		if m != nil && m.Calls > prev {
+			models = append(models, name)
+		}
+	}
+	sort.Strings(models)
+	d.Model = strings.Join(models, ", ")
+	if d.Model == "" && d.Calls > 0 {
+		d.Model = after.LastModel
+	}
+	return d
 }
 
 // usageShort is the one-line summary used in the menu header.
@@ -128,7 +223,11 @@ func usageShort() string {
 	if u.Calls == 0 {
 		return "Tokens: none yet"
 	}
-	return usageLine(u)
+	line := usageLine(u)
+	if u.LastModel != "" {
+		line += " · last model: " + u.LastModel
+	}
+	return line
 }
 
 func formatInt(n int) string {
