@@ -93,7 +93,7 @@ func TestProviderPresets(t *testing.T) {
 }
 
 func TestWebAddressFor(t *testing.T) {
-	if got := webAddressFor(Config{Domain: "muse99.example.com", TLSEnabled: true, WebPort: 8080}); got != "https://muse99.example.com" {
+	if got := webAddressFor(Config{Domain: "muse99.example.com", TLSEnabled: true, WebPort: 8080}); got != "https://muse99.example.com:8080" {
 		t.Fatalf("TLS domain address = %q", got)
 	}
 	if got := webAddressFor(Config{Domain: "muse99.example.com", WebPort: 8080}); got != "http://muse99.example.com:8080" {

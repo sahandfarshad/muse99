@@ -57,6 +57,7 @@ Just run `muse99` over SSH:
   12 Show web address / status
   13 Chats
   14 Toggle shell commands
+  15 Web login (username / password)
   16 Uninstall Muse99
   0  Exit
 ```
@@ -82,6 +83,17 @@ How memories get saved:
 - The Memory tab lists every memory with kind and date — edit or delete one there to correct or forget it.
 
 `MEMORY.md` stays in sync: it is exported from the database (grouped by kind) whenever a memory is saved, and an existing `MEMORY.md` is imported once on first run if the database is empty. Importing never rewrites your file. Token usage totals are also kept in the database (migrated from `usage.json` on first run); `usage.json` is still written as a fallback export.
+
+## Web login — username and password
+
+The web UI can run commands and holds your API keys, so it is **never served without a login**. Set the login in the SSH menu, option **15 (Web login)**: pick a username and a password (at least 8 characters, typed without echo). Only a bcrypt hash is saved in `~/.muse99/config.json`. Until a login is set, the web UI shows a locked page that says how to set one, and the menu header shows `Web login: NOT SET`.
+
+- Sessions are an HttpOnly, SameSite=Strict cookie (Secure when SSL is on), valid for 7 days; restarting the web UI signs everyone out. **Log out** is in the top bar.
+- 5 wrong passwords from one IP lock that IP out for 15 minutes.
+- Requests from another site are refused (Origin check), so a malicious page cannot drive your Muse99 through your browser.
+- Docker / systemd: set `MUSE99_WEB_USER` and `MUSE99_WEB_PASSWORD` in the environment instead; they override the saved login.
+- `/api/status` answers without a login only with `{"ok":true}`, so the menu and installer can still see the UI is up.
+- The Files tab only opens paths inside the workdir.
 
 ## Shell — a checkbox, not a flag
 
@@ -182,7 +194,9 @@ Cost is an estimate at Spark rates — $1.25 per 1M input tokens, $4.25 per 1M o
 
 ## Domain and SSL
 
-Point your domain at the server (an A record to its IP), open ports 80 and 443, then in the SSH menu: option 6 to set the domain, option 7 for SSL. If certbot is installed it runs `sudo certbot certonly --standalone -d <domain>` for you; if not, it prints the exact install commands. Certificates are looked for in `~/.muse99/certs/` and `/etc/letsencrypt/live/<domain>/`. Once SSL is on, restart the web UI (option 4) and the link on top of the menu becomes `https://your-domain`.
+Point your domain at the server (an A record to its IP), open port 80 (for the Let's Encrypt check) and the web UI port, then in the SSH menu: option 6 to set the domain, option 7 for SSL. If certbot is installed it runs `sudo certbot certonly --standalone -d <domain>` for you; if not, it prints the exact install commands.
+
+The Let's Encrypt private key is root-only, so Muse99 copies the pair into `~/.muse99/certs/` (key `0600`, owned by you) and installs a certbot deploy hook (`/etc/letsencrypt/renewal-hooks/deploy/muse99.sh`) that repeats the copy after every renewal. The web UI re-reads the certificate when the file changes, so renewals apply **without a restart**. Once SSL is on, restart the web UI (option 4); the link on top of the menu becomes `https://your-domain:<port>` (or `https://your-domain` when the port is 443).
 
 ## Updating
 
@@ -246,6 +260,8 @@ git push origin v0.1.0
 | `main.go` | CLI, config, `--task`, `--schedule`, `--web`, `--menu` |
 | `agent.go` | Autonomous loop: plan → act → verify → DONE, 100 steps, sessions |
 | `menu.go` | SSH menu — web address on top, start/stop/restart, port, domain, SSL, update, providers, chats, shell toggle |
+| `auth.go` | Web login — bcrypt password, session cookie, rate limit, same-origin check, SSH menu option 15 |
+| `certs.go` | TLS — certificate hot reload, Let's Encrypt copy + renewal hook, workdir path check |
 | `web.go` | Modern minimal web dashboard — chat sidebar, files, tasks, memory, servers, settings; model picker; real start/stop/restart + TLS |
 | `models.go` | Model discovery + testing — `GET /models` fetch, 10-min cache, persisted last-known list, `/api/models` + `/api/models/test` |
 | `db.go` | Embedded database (bbolt) — persistent chats, memories, usage, model lists; scoring, dedupe, auto-summary |

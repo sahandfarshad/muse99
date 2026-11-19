@@ -42,6 +42,10 @@ type FileConfig struct {
 	ActiveProvider string              `json:"active_provider,omitempty"`
 	Providers      map[string]Provider `json:"providers,omitempty"`
 	AllowShell     bool                `json:"allow_shell,omitempty"`
+	// Web UI login (set from SSH menu option 15). Only a bcrypt hash
+	// of the password is stored.
+	WebUser     string `json:"web_user,omitempty"`
+	WebPassHash string `json:"web_pass_hash,omitempty"`
 }
 
 // Provider presets. All are OpenAI-compatible /chat/completions endpoints,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -33,6 +34,8 @@ type webServer struct {
 	system        string
 	db            *DB
 	currentChatID string
+	auth          *authStore
+	tlsActive     bool
 }
 
 type chatReq struct {
@@ -131,9 +134,9 @@ func (c *webController) Start(cfg Config) error {
 			}
 		}
 	}
-	mux := buildMux(s)
+	s.auth = newAuthStore()
 	addr := fmt.Sprintf("%s:%d", cfg.WebAddr, cfg.WebPort)
-	c.srv = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	c.srv = &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute}
 	c.cfg = cfg
 	certFile, keyFile, hasCerts := "", "", false
 	if cfg.TLSEnabled {
@@ -142,6 +145,22 @@ func (c *webController) Start(cfg Config) error {
 		} else {
 			certFile, keyFile, hasCerts = findCerts(cfg.Domain)
 		}
+	}
+	var reloader *certReloader
+	if cfg.TLSEnabled && hasCerts {
+		r, err := newCertReloader(certFile, keyFile)
+		if err != nil {
+			fmt.Println("Warning: TLS certificate could not be loaded (" + err.Error() + ") — serving plain HTTP. Run SSL setup (menu option 7) again.")
+			hasCerts = false
+		} else {
+			reloader = r
+			c.srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: r.GetCertificate}
+		}
+	}
+	s.tlsActive = cfg.TLSEnabled && hasCerts
+	c.srv.Handler = buildHandler(s)
+	if !loginConfigured() {
+		fmt.Println("Warning: no web login is set — the web UI stays locked. Set one with menu option 15.")
 	}
 	if cfg.TLSEnabled && !hasCerts {
 		fmt.Println("Warning: TLS is on but no certificate was found — serving plain HTTP. Set up SSL from the menu first.")
@@ -164,7 +183,8 @@ func (c *webController) Start(cfg Config) error {
 	go func() {
 		var err error
 		if cfg.TLSEnabled && hasCerts {
-			err = c.srv.ServeTLS(ln, certFile, keyFile)
+			_ = reloader
+			err = c.srv.ServeTLS(ln, "", "")
 		} else {
 			err = c.srv.Serve(ln)
 		}
@@ -735,10 +755,10 @@ func (s *webServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	if p == "" {
 		p = s.cfg.Workdir
 	}
-	full := safePath(s.cfg.Workdir, p)
-	// Allow absolute workdir paths too.
-	if filepath.IsAbs(p) {
-		full = p
+	full, ok := pathInWorkdir(s.cfg.Workdir, p)
+	if !ok {
+		http.Error(w, "path is outside the workdir", http.StatusForbidden)
+		return
 	}
 	entries, err := os.ReadDir(full)
 	if err != nil {
@@ -760,7 +780,12 @@ func (s *webServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 
 func (s *webServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Query().Get("path")
-	data, err := os.ReadFile(safePath(s.cfg.Workdir, p))
+	full, ok := pathInWorkdir(s.cfg.Workdir, p)
+	if !ok {
+		http.Error(w, "path is outside the workdir", http.StatusForbidden)
+		return
+	}
+	data, err := os.ReadFile(full)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -946,6 +971,15 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// buildHandler is the production handler: the API mux behind the
+// login (auth.go). Tests that exercise the API directly use buildMux.
+func buildHandler(s *webServer) http.Handler {
+	if s.auth == nil {
+		s.auth = newAuthStore()
+	}
+	return s.withAuth(buildMux(s))
+}
+
 func buildMux(s *webServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
@@ -982,135 +1016,182 @@ func startWeb(cfg Config, client *Client, runner *toolRunner, tools []ToolDef, s
 
 const webHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Muse99</title>
 <style>
-:root{--bg:#fafaf9;--surface:#ffffff;--ink:#171717;--ink2:#525252;--muted:#a3a3a3;--line:#e7e5e4;--line2:#f0efed;--accent:#4f46e5;--accent-soft:#eef2ff;--accent-ink:#3730a3;--ok:#15803d;--bad:#b91c1c;--radius:16px;--shadow:0 1px 2px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.04);--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+:root{--bg:#f7f5f1;--surface:#fffdfa;--ink:#1d1b18;--ink2:#5d5850;--muted:#9a948a;--line:#e9e4dc;--line2:#f0ece5;--glow:#e8dccb;--accent:#1d1b18;--accent-soft:#f0ece5;--accent-ink:#1d1b18;--ok:#3d7a52;--bad:#b0452a;--warn:#b0602a;--radius:14px;--r-lg:22px;--shadow:0 1px 2px rgba(40,30,20,.04),0 8px 28px rgba(40,30,20,.06);--font:ui-sans-serif,-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--side:264px}
+@media (prefers-color-scheme:dark){:root{--bg:#161513;--surface:#1f1d1a;--ink:#f1ece4;--ink2:#b9b2a7;--muted:#7d776d;--line:#2e2b27;--line2:#27241f;--glow:#4a3f30;--accent:#f1ece4;--accent-soft:#2a2722;--accent-ink:#f1ece4;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.25)}}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
 body{font-family:var(--font);background:var(--bg);color:var(--ink);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
-header{position:sticky;top:0;background:rgba(255,255,255,.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);z-index:20}
-.topbar{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.brand{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:700;letter-spacing:-.02em}
-.brand .mark{width:26px;height:26px;border-radius:8px;background:var(--ink);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:14px}
-.pill{display:inline-flex;align-items:center;gap:6px;background:var(--line2);color:var(--ink2);padding:4px 11px;border-radius:999px;font-size:12.5px;font-weight:500;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pill.spark{background:var(--accent-soft);color:var(--accent-ink)}
-.pill.model{background:#fff;border:1px solid var(--line);color:var(--ink)}
+::selection{background:var(--glow)}
+/* sidebar */
+aside{position:fixed;left:0;top:0;bottom:0;width:var(--side);padding:18px 14px 14px;display:flex;flex-direction:column;gap:6px;border-right:1px solid var(--line);background:linear-gradient(180deg,var(--surface),var(--bg));z-index:30}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 8px 14px;font-weight:650;font-size:17px;letter-spacing:-.01em}
+.orb{width:26px;height:26px;border-radius:50%;flex:none;background:radial-gradient(circle at 30% 30%,#fff 0,#f1e6d6 35%,#c9b49a 100%);box-shadow:inset 0 0 0 1px rgba(0,0,0,.06),0 2px 8px rgba(150,120,80,.25)}
+.newchat{display:flex;align-items:center;gap:8px;width:100%;padding:10px 12px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--line);box-shadow:var(--shadow);font-weight:560;color:var(--ink);font-size:14px;cursor:pointer;text-align:left}
+.newchat:hover{border-color:var(--ink2)}
+#chat-search{margin:8px 0 2px;background:var(--line2);border-color:transparent}
+.sect{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:12px 10px 4px}
+#chatlist{flex:1;overflow-y:auto;min-height:60px;margin:0 -4px;padding:0 4px}
+.chatitem{display:flex;gap:4px;align-items:center;padding:8px 10px;border-radius:10px;cursor:pointer;font-size:14px;color:var(--ink2)}
+.chatitem:hover{background:var(--line2);color:var(--ink)}
+.chatitem.active{background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+.chatitem span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chatitem button{background:none;border:0;color:var(--muted);cursor:pointer;padding:2px 5px;font-size:12px;border-radius:6px;opacity:0;transition:opacity .15s}
+.chatitem:hover button,.chatitem.active button{opacity:1}
+.chatitem button:hover{color:var(--ink)}
+.tabs{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--line);padding-top:10px;margin-top:6px}
+.tabs button{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:10px;background:none;border:0;color:var(--ink2);font-size:14px;cursor:pointer;text-align:left;font-family:var(--font)}
+.tabs button i{font-style:normal;width:18px;text-align:center;opacity:.7}
+.tabs button:hover{background:var(--line2);color:var(--ink)}
+.tabs button.active{background:var(--line2);color:var(--ink);font-weight:560}
+.me{display:flex;align-items:center;gap:10px;padding:10px 8px 0;font-size:13.5px;color:var(--ink2)}
+.av{width:28px;height:28px;border-radius:50%;background:var(--ink);color:var(--bg);display:grid;place-items:center;font-size:12px;font-weight:600}
+.me a{margin-left:auto;color:var(--muted);text-decoration:none;font-size:13px}.me a:hover{color:var(--ink)}
+/* top bar */
+.page{margin-left:var(--side);min-height:100vh}
+header{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 86%,transparent);backdrop-filter:blur(12px)}
+.topbar{display:flex;gap:10px;align-items:center;padding:14px 28px;flex-wrap:wrap}
+#pagetitle{font-weight:600;font-size:15px;margin-right:6px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;background:var(--surface);border:1px solid var(--line);font-size:12.5px;color:var(--ink2);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill.model::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(61,122,82,.15);flex:none}
+.pill.spark{background:none;border-color:transparent;color:var(--muted)}
 .spacer{flex:1}
-.tabs{max-width:1180px;margin:0 auto;padding:0 20px;display:flex;gap:4px;overflow-x:auto}
-.tabs button{background:none;border:0;color:var(--ink2);padding:11px 13px;cursor:pointer;font-size:14px;font-weight:500;white-space:nowrap;border-radius:10px 10px 0 0;border-bottom:2px solid transparent}
-.tabs button:hover{color:var(--ink)}
-.tabs button.active{color:var(--ink);border-bottom-color:var(--ink);font-weight:650}
-.layout{display:flex;max-width:1180px;margin:0 auto;align-items:flex-start}
-aside{width:264px;flex-shrink:0;padding:20px 12px 20px 20px;position:sticky;top:104px;height:calc(100vh - 104px);overflow-y:auto}
-aside h3{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:2px 4px 10px;font-weight:650}
-aside input{margin-bottom:10px}
-main{flex:1;min-width:0;max-width:820px;padding:22px 20px 170px}
-.pane{display:none;animation:fade .18s ease}
+.shellbox{display:inline-flex;gap:8px;align-items:center;font-size:12.5px;color:var(--ink2);cursor:pointer;user-select:none}
+.shellbox input{appearance:none;-webkit-appearance:none;width:34px;height:20px;margin:0;padding:0;border:0;border-radius:999px;background:#d9d3c9;position:relative;cursor:pointer;transition:background .2s}
+.shellbox input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2);transition:left .2s}
+.shellbox input:checked{background:var(--warn)}.shellbox input:checked::after{left:16px}
+.shellbox input:focus{box-shadow:0 0 0 3px var(--glow)}
+.iconbtn{background:none;border:1px solid transparent;color:var(--ink2);border-radius:999px;padding:6px 12px;cursor:pointer;font-size:12.5px;font-family:var(--font)}
+.iconbtn:hover{border-color:var(--line);color:var(--ink)}
+/* content */
+main{max-width:760px;margin:0 auto;padding:10px 28px 200px}
+.pane{display:none;animation:fade .2s ease}
 .pane.active{display:block}
-@keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
-.msg{padding:11px 15px;border-radius:18px;line-height:1.6;white-space:pre-wrap;max-width:85%;margin-bottom:12px;font-size:15px;box-shadow:var(--shadow)}
-.user{margin-left:auto;background:var(--ink);color:#fff;border-bottom-right-radius:6px}
-.muse{background:var(--surface);border:1px solid var(--line);border-bottom-left-radius:6px}
-.tools{font-size:12px;color:var(--muted);margin-top:6px}
-.composer{position:fixed;left:0;right:0;bottom:0;background:linear-gradient(transparent,var(--bg) 30%);padding:22px 20px 16px;z-index:10}
-.composer .row{max-width:820px;margin:0 auto;display:flex;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 5px 5px 18px;box-shadow:var(--shadow)}
-.composer input{flex:1;border:0;background:none;padding:10px 0;font-size:15px;outline:none}
-.composer button{padding:10px 20px;border-radius:999px;border:0;background:var(--ink);color:#fff;font-weight:600;cursor:pointer;font-size:14px}
-.composer button:hover{background:#000}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+#chat{display:flex;flex-direction:column}
+.msg{line-height:1.65;white-space:pre-wrap;margin:14px 0;font-size:15px;overflow-wrap:anywhere}
+.msg.user{align-self:flex-end;max-width:78%;background:var(--ink);color:var(--bg);padding:11px 16px;border-radius:20px 20px 6px 20px}
+.msg.muse{position:relative;padding-left:38px;max-width:100%}
+.msg.muse::before{content:"";position:absolute;left:0;top:1px;width:24px;height:24px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#fff 0,#f1e6d6 35%,#c9b49a 100%);box-shadow:inset 0 0 0 1px rgba(0,0,0,.06),0 2px 8px rgba(150,120,80,.25)}
+.tools{display:inline-block;font-size:12px;color:var(--muted);margin-top:8px;background:var(--line2);padding:3px 10px;border-radius:999px;white-space:normal}
+#thinking{display:none;align-items:center;gap:10px;margin:14px 0 14px 38px;padding:12px 16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);font-size:13.5px;color:var(--ink2);width:fit-content}
+#thinking::before{content:"";width:12px;height:12px;border-radius:50%;border:2px solid var(--glow);border-top-color:var(--ink);animation:spin .8s linear infinite;display:inline-block;margin-right:8px;vertical-align:-1px}
+@keyframes spin{to{transform:rotate(360deg)}}
+code,pre{font-family:var(--mono)}
+/* composer */
+.composer{position:fixed;left:var(--side);right:0;bottom:0;padding:24px 28px 22px;background:linear-gradient(180deg,transparent,var(--bg) 42%);z-index:10;margin:0}
+.composer .row{max-width:704px;margin:0 auto;display:flex;align-items:flex-end;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:10px 10px 10px 18px;box-shadow:0 2px 4px rgba(40,30,20,.04),0 16px 40px rgba(40,30,20,.10);transition:border-color .2s}
+.composer .row:focus-within{border-color:var(--ink2)}
+.composer input{flex:1;border:0;background:none;padding:10px 0;font-size:15px;outline:none;box-shadow:none!important}
+.composer button{width:38px;height:38px;flex:none;border-radius:50%;border:0;background:var(--ink);color:var(--bg);font-size:0;cursor:pointer;position:relative}
+.composer button::after{content:"↑";font-size:17px;font-weight:600;position:absolute;inset:0;display:grid;place-items:center}
+.composer button:hover{opacity:.88}
+.composer .hint{text-align:center;font-size:11.5px;color:var(--muted);margin-top:9px}
+.composer.hide{display:none}
+/* controls */
 button{font-family:var(--font)}
-.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 16px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:600;font-size:13.5px;cursor:pointer}
-.btn:hover{border-color:var(--ink)}
-.btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
-.btn.primary:hover{background:#000}
-.btn.ghost{background:none;border:1px solid var(--line);color:var(--ink2);font-weight:500}
-.btn:disabled{opacity:.5;cursor:wait}
-input,textarea,select{padding:10px 13px;border-radius:12px;border:1px solid var(--line);background:var(--surface);font-size:14px;width:100%;font-family:var(--font);color:var(--ink);outline:none}
-input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 15px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:560;font-size:13.5px;cursor:pointer;transition:border-color .15s,opacity .15s}
+.btn:hover{border-color:var(--ink2)}
+.btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.btn.primary:hover{opacity:.88}
+.btn.ghost{background:none;color:var(--ink2);font-weight:500}
+.btn:disabled{opacity:.45;cursor:wait}
+input,textarea,select{padding:10px 13px;border-radius:10px;border:1px solid var(--line);background:var(--line2);font-size:14px;width:100%;font-family:var(--font);color:var(--ink);outline:none;transition:border-color .15s,box-shadow .15s,background .15s}
+input:focus,textarea:focus,select:focus{border-color:var(--ink2);background:var(--surface);box-shadow:0 0 0 3px var(--glow)}
+textarea{font-family:var(--mono);font-size:13px;line-height:1.55}
 label{display:block;font-size:13px;color:var(--ink2);margin:16px 0 6px;font-weight:550}
 label .hint{font-weight:400;color:var(--muted)}
-pre{background:var(--surface);border:1px solid var(--line);padding:15px;border-radius:var(--radius);overflow:auto;white-space:pre-wrap;font-size:13px;box-shadow:var(--shadow)}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:14px;box-shadow:var(--shadow)}
-.card h3{margin:0 0 4px;font-size:16px;letter-spacing:-.01em}
-.card p.sub{margin:0 0 6px;color:var(--ink2);font-size:13.5px}
-h3.sec{font-size:17px;margin:6px 0 14px;letter-spacing:-.01em}
-.note{font-size:13px;color:var(--muted);margin-top:10px;line-height:1.5}
-.chatitem{display:flex;gap:6px;align-items:center;padding:9px 11px;border-radius:11px;cursor:pointer;font-size:14px;color:var(--ink2)}
-.chatitem:hover{background:var(--line2);color:var(--ink)}
-.chatitem.active{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
-.chatitem span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chatitem button{background:none;border:0;color:var(--muted);cursor:pointer;padding:2px 5px;font-size:13px;border-radius:6px}
-.chatitem button:hover{color:var(--ink)}
-.shellbox{display:inline-flex;gap:7px;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 13px;font-size:13px;color:var(--ink2);cursor:pointer;font-weight:500}
-.shellbox input{width:auto;margin:0;accent-color:var(--accent)}
-.shellbox.on{border-color:var(--ink);color:var(--ink);font-weight:600}
-.iconbtn{background:none;border:1px solid var(--line);color:var(--ink2);border-radius:999px;padding:7px 13px;cursor:pointer;font-size:13px;font-weight:500}
-.iconbtn:hover{color:var(--ink);border-color:var(--ink)}
+pre{background:var(--surface);border:1px solid var(--line);padding:16px;border-radius:var(--radius);overflow:auto;white-space:pre-wrap;font-size:12.5px;box-shadow:var(--shadow)}
+a{color:var(--ink)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin-bottom:14px;box-shadow:var(--shadow)}
+.card h3{margin:0 0 4px;font-size:14.5px;letter-spacing:-.005em}
+.card p.sub{margin:0 0 8px;color:var(--muted);font-size:13px}
+h3.sec{font-size:26px;letter-spacing:-.02em;font-weight:650;margin:14px 0 6px}
+h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
+.note{font-size:13px;color:var(--muted);margin-top:10px;line-height:1.55}
 .modelrow{display:flex;gap:8px;align-items:flex-start}
 .modelrow input{flex:1}
-.modelrow .btn{flex-shrink:0;margin-top:1px}
-.modelitem{display:flex;gap:10px;align-items:center;padding:11px 13px;border:1px solid var(--line);border-radius:12px;margin-bottom:8px;cursor:pointer;background:var(--surface)}
-.modelitem:hover{border-color:var(--ink)}
-.modelitem.active{border-color:var(--accent);background:var(--accent-soft)}
+.modelrow .btn{flex-shrink:0;margin-top:2px}
+.modelitem{display:flex;gap:10px;align-items:center;padding:10px 13px;border:1px solid var(--line);border-radius:10px;margin-bottom:6px;cursor:pointer;background:var(--surface);transition:border-color .15s}
+.modelitem:hover{border-color:var(--ink2)}
+.modelitem.active{border-color:var(--ink);box-shadow:0 0 0 3px var(--glow)}
 .modelitem .mid{flex:1;min-width:0}
-.modelitem .mid b{font-size:14px;word-break:break-all}
-.modelitem .mid .sub{font-size:12.5px;color:var(--muted)}
-.modelitem .res{font-size:12.5px;overflow-wrap:anywhere;max-width:340px;text-align:right}
+.modelitem .mid b{font-size:13.5px;font-weight:600;word-break:break-all}
+.modelitem .mid .sub{font-size:12px;color:var(--muted)}
+.modelitem .res{font-size:12px;overflow-wrap:anywhere;max-width:300px;text-align:right}
 .modelitem .res.ok{color:var(--ok)}
 .modelitem .res.bad{color:var(--bad)}
-.modelitem .btn{padding:6px 12px;font-size:12.5px;flex-shrink:0}
-.taskbar{max-width:1180px;margin:12px auto 0;padding:10px 16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);cursor:pointer;font-size:13.5px}
+.modelitem .btn{padding:5px 11px;font-size:12px;flex-shrink:0}
+.taskbar{max-width:704px;margin:4px auto 0;padding:10px 16px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow);cursor:pointer;font-size:13.5px}
 .taskbar.bad{border-color:var(--bad);color:var(--bad)}
 .status{font-size:13px;margin-top:9px;min-height:19px;color:var(--ink2)}
 .status.ok{color:var(--ok)}
 .status.bad{color:var(--bad)}
 .kv{font-size:13.5px;color:var(--ink2);line-height:1.9}
 .kv b{color:var(--ink);font-weight:600}
-.tag{display:inline-block;background:var(--accent-soft);color:var(--accent-ink);border-radius:6px;padding:1px 7px;font-size:12px;font-weight:600}
+.tag{display:inline-block;background:var(--ink);color:var(--bg);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:650;letter-spacing:.02em}
 .empty{color:var(--muted);font-size:14px;padding:8px 2px}
-@media (max-width:820px){.layout{flex-direction:column}aside{width:100%;position:static;height:auto;padding:14px 20px 4px;border-bottom:1px solid var(--line)}main{padding:16px 16px 170px}.msg{max-width:92%}.topbar{padding:10px 14px}.tabs{padding:0 14px}.pill.addr{display:none}}
+#filelist .card,#tasklist .card,#memlist .card,#srvlist .card{padding:12px 16px;margin-bottom:8px;font-size:14px}
+#filelist .card:hover{border-color:var(--ink2)}
+.check{display:flex!important;gap:10px;align-items:center;font-weight:500}
+.check input{width:auto;margin:0;accent-color:var(--ink)}
+.savebar{display:flex;align-items:center;gap:14px;margin-top:6px}
+@media (max-width:860px){:root{--side:0px}aside{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 14px}#chatlist{max-height:150px}.tabs{flex-direction:row;overflow-x:auto;border-top:0;padding-top:4px}.tabs button{white-space:nowrap}.me{display:none}.topbar{padding:10px 14px}.pill.addr,.pill.spark{display:none}main{padding:8px 16px 190px}.composer{left:0;padding:20px 14px 14px}.msg.user{max-width:90%}}
 </style></head><body>
-<header><div class="topbar"><span class="brand"><span class="mark">✦</span>Muse99</span><span class="pill spark" id="mode">…</span><span class="pill model" id="model"></span><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><span class="spacer"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust."><input type="checkbox" id="shell-toggle" onchange="toggleShell()"> Shell</label><button class="iconbtn" onclick="clearChat()">Clear chat</button></div>
-<nav class="tabs"><button class="active" onclick="tab('chat',this)">Chat</button><button onclick="tab('files',this)">Files</button><button onclick="tab('tasks',this)">Tasks</button><button onclick="tab('memory',this)">Memory</button><button onclick="tab('servers',this)">Servers</button><button onclick="tab('settings',this)">Settings</button></nav></header>
+<aside id="sidebar">
+<div class="brand"><span class="orb"></span>Muse99</div>
+<button class="newchat" onclick="newChat()">✎&nbsp; New chat</button>
+<input id="chat-search" placeholder="Search chats" oninput="loadChats()">
+<div class="sect">Chats</div>
+<div id="chatlist"></div>
+<nav class="tabs"><button class="active" onclick="tab('chat',this)"><i>◌</i>Chat</button><button onclick="tab('files',this)"><i>▤</i>Files</button><button onclick="tab('tasks',this)"><i>◎</i>Tasks</button><button onclick="tab('memory',this)"><i>✦</i>Memory</button><button onclick="tab('servers',this)"><i>⌁</i>Servers</button><button onclick="tab('settings',this)"><i>⚙</i>Settings</button></nav>
+<div class="me"><span class="av">✦</span><span id="me-name">Muse99</span><a href="/logout">Log out</a></div>
+</aside>
+<div class="page">
+<header><div class="topbar"><span id="pagetitle">Chat</span><span class="pill spark" id="mode">…</span><span class="spacer"></span><span class="pill model" id="model"></span><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust.">Shell <input type="checkbox" id="shell-toggle" onchange="toggleShell()"></label><button class="iconbtn" onclick="clearChat()">Clear</button></div></header>
 <div id="taskbar" class="taskbar" style="display:none" onclick="showTasksTab()"></div>
-<div class="layout"><aside id="sidebar"><h3>Chats</h3><input id="chat-search" placeholder="Search chats…" oninput="loadChats()"><button class="btn primary" style="width:100%;justify-content:center;margin-bottom:10px" onclick="newChat()">+ New chat</button><div id="chatlist"></div></aside><main>
-<div id="pane-chat" class="pane active"><div id="nokey" class="card" style="display:none"><h3>No API key yet</h3><p class="sub">Muse99 can't chat until you add a provider API key. It only takes a minute, and it happens right here in the web UI — no terminal commands.</p><button class="btn primary" onclick="showSettingsTab()">Open Settings → Provider &amp; model</button></div><div id="chat"></div><div class="muted" id="thinking" style="display:none">Muse99 is working…</div></div>
-<div id="pane-files" class="pane"><h3 class="sec">Files</h3><div id="filelist"></div><pre id="fileview">Click a file to view it.</pre></div>
-<div id="pane-tasks" class="pane"><h3 class="sec">Autonomous tasks</h3><div class="card"><div class="modelrow"><input id="taskgoal" placeholder="Build a todo app in ./todo-app with tests…"><button class="btn primary" onclick="startTask()">Start task</button></div><p class="note">Muse99 plans the task, builds it, runs the tests, fixes failures, and only stops when it can say DONE.</p></div><div id="tasklist"></div></div>
-<div id="pane-memory" class="pane"><h3 class="sec">Memory</h3><p class="note">Facts Muse99 remembers about you, with kind and source. They are used in every chat. Delete one here to forget it.</p><div id="memlist"></div><button class="btn" onclick="summariseChat()">Summarise current chat into memory</button><h3 class="sec" style="margin-top:24px">Memory file</h3><textarea id="mem" rows="12"></textarea><br><br><button class="btn primary" onclick="saveMemory()">Save memory file</button></div>
-<div id="pane-servers" class="pane"><h3 class="sec">Servers</h3><p class="note">Give Muse99 access only if you want it to. Remote commands use your system ssh key.</p><div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="srv-name" placeholder="Name" style="flex:1;min-width:120px"><input id="srv-user" placeholder="user" style="flex:1;min-width:120px"><input id="srv-host" placeholder="host / IP" style="flex:1;min-width:140px"><input id="srv-port" placeholder="22" style="width:80px"></div><br><button class="btn primary" onclick="addServer()">Add server</button></div><div id="srvlist" style="margin-top:14px"></div></div>
-<div id="pane-settings" class="pane"><h3 class="sec">Settings</h3>
-<div class="card"><h3>Provider &amp; model</h3><p class="sub">Enter a provider and its API key, fetch its models, then click a model to test it and set it active — no typing model names.</p>
+<main>
+<div id="pane-chat" class="pane active"><div id="nokey" class="card" style="display:none;margin-top:18px"><h3>Add an API key to start</h3><p class="sub">Muse99 needs a provider key before it can chat. It takes a minute, right here — no terminal.</p><button class="btn primary" onclick="showSettingsTab()">Open Settings</button></div><div id="chat"></div><div id="thinking">Muse99 is working…</div></div>
+<div id="pane-files" class="pane"><h3 class="sec">Files</h3><p class="note">Everything in your workdir. Click a file to read it.</p><div id="filelist"></div><pre id="fileview">Click a file to view it.</pre></div>
+<div id="pane-tasks" class="pane"><h3 class="sec">Tasks</h3><p class="note">Give it a goal. It plans, builds, tests, fixes, and only stops when it can say DONE.</p><div class="card"><div class="modelrow"><input id="taskgoal" placeholder="Build a todo app in ./todo-app with tests…"><button class="btn primary" onclick="startTask()">Start task</button></div></div><div id="tasklist"></div></div>
+<div id="pane-memory" class="pane"><h3 class="sec">Memory</h3><p class="note">What Muse99 remembers about you, used in every chat. Delete one to forget it.</p><div id="memlist"></div><button class="btn" onclick="summariseChat()">Summarise this chat into memory</button><div class="card" style="margin-top:22px"><h3>Memory file</h3><p class="sub">MEMORY.md, exported from the database.</p><textarea id="mem" rows="12"></textarea><div class="savebar" style="margin-top:12px"><button class="btn primary" onclick="saveMemory()">Save memory file</button></div></div></div>
+<div id="pane-servers" class="pane"><h3 class="sec">Servers</h3><p class="note">Only if you want it to. Remote commands use your system ssh key.</p><div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="srv-name" placeholder="Name" style="flex:1;min-width:120px"><input id="srv-user" placeholder="user" style="flex:1;min-width:120px"><input id="srv-host" placeholder="host / IP" style="flex:1;min-width:140px"><input id="srv-port" placeholder="22" style="width:80px"></div><div class="savebar" style="margin-top:12px"><button class="btn primary" onclick="addServer()">Add server</button></div></div><div id="srvlist" style="margin-top:14px"></div></div>
+<div id="pane-settings" class="pane"><h3 class="sec">Settings</h3><p class="note">Your model, your server, your rules.</p>
+<div class="card"><h3>Provider &amp; model</h3><p class="sub">Pick a provider, fetch its models, click one to test it and set it active.</p>
 <label>Provider</label><select id="set-provider"></select>
 <label>API base URL</label><input id="set-base" placeholder="API base URL">
 <label>API key <span class="hint">— leave blank to keep the saved one</span></label><input id="set-key" placeholder="API key" type="password">
 <div class="status" id="key-source" style="margin-top:6px"></div>
-<div class="kv" style="margin-top:10px">Active model: <b id="active-model">…</b></div>
+<div class="kv" style="margin-top:6px">Active model: <b id="active-model">…</b></div>
 <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" id="fetch-models-btn" onclick="fetchModels()">Fetch models</button><button class="btn" id="test-all-btn" onclick="testAllModels()" disabled>Test all</button><button class="btn ghost" id="test-all-cancel" onclick="cancelTestAll()" style="display:none">Cancel</button></div>
-<input id="model-filter" placeholder="Filter the model list…" oninput="renderModelList()" style="margin-top:10px">
+<input id="model-filter" placeholder="Filter models…" oninput="renderModelList()" style="margin-top:12px">
 <div id="model-list" style="margin-top:10px"></div>
 <div class="status" id="model-status"></div>
 <p class="note"><a href="#" onclick="showManualModel(event)">Fetch didn't return any models? Enter one manually</a></p>
 <div id="manual-model-box" style="display:none;margin-top:8px"><div class="modelrow"><input id="manual-model" placeholder="e.g. gemini-2.5-flash" autocomplete="off"><button class="btn" onclick="saveManualModel()">Use this model</button></div></div>
-<p class="note">Fetching asks the provider's <span style="font-family:monospace">/v1/models</span> endpoint with your key — the key is never shown or logged. Click a model (or its <b>Test</b> button) to send one tiny message ("Reply with the single word OK") and see whether it answers and how fast. <b>Set active</b> makes that model the one Muse99 chats with. <b>Test all</b> tests the first 20 models one by one. For Gemini, if the list endpoint is empty or refuses the key, Muse99 also tries Gemini's native model list — and strips the "models/" prefix, so the model it saves always works for chat.</p>
+<p class="note">Fetch asks the provider's <code>/v1/models</code> with your key; the key is never shown or logged. Test sends one tiny message and shows if the model answers and how fast. Test all checks the first 20. For Gemini, the native list is tried too and the "models/" prefix is stripped.</p>
 </div>
-<div class="card"><h3>Web &amp; access</h3>
+<div class="card"><h3>Web &amp; access</h3><p class="sub">The web login is set from the SSH menu, option 15.</p>
 <label>Your name</label><input id="set-user" placeholder="Your name">
 <label>Web port</label><input id="set-port" placeholder="3759" type="number">
 <label>Domain <span class="hint">— optional, for the web link</span></label><input id="set-domain" placeholder="muse99.example.com">
-<label style="display:flex;gap:8px;align-items:center"><input id="set-tls" type="checkbox" style="width:auto"> SSL / HTTPS on</label>
-<label style="display:flex;gap:8px;align-items:center"><input id="set-shell" type="checkbox" style="width:auto"> Allow shell commands</label>
-<p class="note">Lets Muse99 run commands on this server. Only turn on in a folder you trust. Takes effect immediately — no restart needed.</p>
+<label class="check"><input id="set-tls" type="checkbox"> SSL / HTTPS on</label>
+<label class="check"><input id="set-shell" type="checkbox"> Allow shell commands</label>
+<p class="note">Shell lets Muse99 run commands on this server. Only turn it on in a folder you trust. It applies at once; port and SSL need a web UI restart from the SSH menu.</p>
 </div>
-<div class="card" id="usagebox"><h3>Token usage</h3><span id="usage-detail">Loading…</span><div class="kv" id="settings" style="margin-top:10px"></div></div>
-<br><button class="btn primary" onclick="saveSettings()">Save settings</button>
-<p class="note">Saved to ~/.muse99/config.json (600 permissions). Changing the port or SSL needs a restart of the web UI — do it from the SSH menu (Restart web UI).</p></div>
-</main></div>
-<form id="f" class="composer"><div class="row"><input id="in" autocomplete="off" placeholder="Ask Muse99 to do something…"><button>Send</button></div></form>
+<div class="card" id="usagebox"><h3>Usage</h3><p class="sub">Estimated at Spark rates.</p><span id="usage-detail">Loading…</span><div class="kv" id="settings" style="margin-top:10px"></div></div>
+<div class="savebar"><button class="btn primary" onclick="saveSettings()">Save settings</button><span class="note" style="margin:0">Saved to ~/.muse99/config.json (600).</span></div></div>
+</main>
+<form id="f" class="composer"><div class="row"><input id="in" autocomplete="off" placeholder="Give Muse99 a task…"><button aria-label="Send">Send</button></div><div class="hint">Muse99 can run commands on this server while Shell is on.</div></form>
+</div>
 <script>
+if(window.fetch){const _fetch=window.fetch.bind(window);window.fetch=async(...a)=>{const r=await _fetch(...a);if(r.status===401){location.href='/login';}return r;};}
+
 const chat=document.getElementById('chat'),inp=document.getElementById('in'),think=document.getElementById('thinking');
 document.getElementById('addr').textContent=window.location.href;
 function showSettingsTab(){document.querySelectorAll('.tabs button')[5].click();}
 function showTasksTab(){document.querySelectorAll('.tabs button')[2].click();}
 let tasksTimer=null;
-function tab(name,btn){document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));document.getElementById('pane-'+name).classList.add('active');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');if(name==='files')loadFiles('');if(name==='tasks'){loadTasks();if(!tasksTimer)tasksTimer=setInterval(loadTasks,3000);}else if(tasksTimer){clearInterval(tasksTimer);tasksTimer=null;}if(name==='memory'){loadMemory();loadMemories();}if(name==='servers')loadServers();if(name==='settings')loadSettings();}
+function tab(name,btn){document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));document.getElementById('pane-'+name).classList.add('active');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');{const pt=document.getElementById('pagetitle');if(pt)pt.textContent=btn.textContent.replace(/^[^A-Za-z]+/,'');const fm=document.getElementById('f');if(fm&&fm.classList)fm.classList.toggle('hide',name!=='chat');}if(name==='files')loadFiles('');if(name==='tasks'){loadTasks();if(!tasksTimer)tasksTimer=setInterval(loadTasks,3000);}else if(tasksTimer){clearInterval(tasksTimer);tasksTimer=null;}if(name==='memory'){loadMemory();loadMemories();}if(name==='servers')loadServers();if(name==='settings')loadSettings();}
 // refreshTaskBar is the background-activity indicator: while a task
 // runs (or one just failed) it shows what is happening on every
 // pane, including Chat — a task started from the Tasks tab is no
@@ -1132,7 +1213,7 @@ async function loadMemories(){const r=await fetch('/api/memories');const j=await
 async function deleteMemory(id){await fetch('/api/memories/'+id,{method:'DELETE'});loadMemories();}
 async function summariseChat(){const r=await fetch('/api/chats/'+(currentChatId||'')+'/summarise',{method:'POST'});const j=await r.json();alert('Saved '+(j.saved||0)+' new fact(s) to memory.');loadMemories();}
 async function toggleShell(){const on=document.getElementById('shell-toggle').checked;await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow_shell:on})});document.getElementById('shellbox').classList.toggle('on',on);loadStatus();}
-async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;document.getElementById('model').textContent=s.model+' · '+s.user;if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);const nk=document.getElementById('nokey');if(nk){nk.style.display=s.api_key_set?'none':'block';}const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
+async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;document.getElementById('model').textContent=s.model;{const mn=document.getElementById('me-name');if(mn&&s.user)mn.textContent=s.user;const av=document.querySelector?document.querySelector('.me .av'):null;if(av&&s.user)av.textContent=s.user.trim().charAt(0).toUpperCase();}if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);const nk=document.getElementById('nokey');if(nk){nk.style.display=s.api_key_set?'none':'block';}const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
 loadChats();
 document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;add(v,'user');inp.value='';think.style.display='block';try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';add(j.reply||j.error||'(no reply)','muse',j.tools);}catch(err){think.style.display='none';add('Could not reach server: '+err,'muse');}});
 async function clearChat(){await fetch('/api/clear',{method:'POST'});chat.innerHTML='';add('Chat cleared. Memory is kept.','muse');}
@@ -1142,7 +1223,7 @@ async function loadTasks(){const r=await fetch('/api/task');const j=await r.json
 async function startTask(){const g=document.getElementById('taskgoal').value.trim();if(!g)return;const r=await fetch('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal:g})});const j=await r.json().catch(()=>({}));document.getElementById('taskgoal').value='';setTimeout(loadTasks,1000);add('Started autonomous task: '+g+(j.task_id?' ('+j.task_id+')':''),'muse');refreshTaskBar();}
 async function loadMemory(){const r=await fetch('/api/memory');const j=await r.json();document.getElementById('mem').value=j.memory||'';}
 async function saveMemory(){await fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({memory:document.getElementById('mem').value})});alert('Saved');}
-async function loadServers(){const r=await fetch('/api/servers');const j=await r.json();document.getElementById('srvlist').innerHTML=j.map(s=>'<div class="card">'+s.name+' — '+s.user+'@'+s.host+':'+s.port+'</div>').join('')||'<div class="empty">(no servers — Muse99 only uses servers you add here)</div>';}
+async function loadServers(){const r=await fetch('/api/servers');const j=await r.json();document.getElementById('srvlist').innerHTML=j.map(s=>'<div class="card">'+escapeHtml(s.name||'')+' — '+escapeHtml(s.user||'')+'@'+escapeHtml(s.host||'')+':'+escapeHtml(String(s.port||22))+'</div>').join('')||'<div class="empty">(no servers — Muse99 only uses servers you add here)</div>';}
 async function addServer(){const b={name:document.getElementById('srv-name').value,user:document.getElementById('srv-user').value,host:document.getElementById('srv-host').value,port:parseInt(document.getElementById('srv-port').value||'22')};await fetch('/api/servers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});loadServers();}
 // --- model discovery (v6): clickable list, click-to-test, set active ---
 // No model text input any more: Fetch models, click a model to test

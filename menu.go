@@ -44,7 +44,10 @@ func httpGet(url string) (*http.Response, error) {
 func webAddressFor(cfg Config) string {
 	if cfg.Domain != "" {
 		if cfg.TLSEnabled {
-			return "https://" + cfg.Domain
+			if cfg.WebPort == 443 || cfg.WebPort == 0 {
+				return "https://" + cfg.Domain
+			}
+			return fmt.Sprintf("https://%s:%d", cfg.Domain, cfg.WebPort)
 		}
 		if cfg.WebPort == 80 {
 			return "http://" + cfg.Domain
@@ -109,6 +112,12 @@ func printMenuHeader(cfg Config, ctrl *webController) {
 		shell = "ON"
 	}
 	fmt.Printf("  Shell commands: %s  ·  %s\n", shell, usageShort())
+	if loginConfigured() {
+		u, _ := webCredentials()
+		fmt.Printf("  Web login: %s\n", u)
+	} else {
+		fmt.Println("  Web login: NOT SET — the web UI is locked until you set one (option 15)")
+	}
 	fmt.Printf("  User: %s  ·  Workdir: %s\n", cfg.UserName, cfg.Workdir)
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
@@ -275,6 +284,7 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 		fmt.Println("  12 Show web address / status")
 		fmt.Println("  13 Chats")
 		fmt.Println("  14 Toggle shell commands")
+		fmt.Println("  15 Web login (username / password)")
 		fmt.Println("  0  Exit")
 		fmt.Println("  16 Uninstall Muse99")
 		fmt.Println()
@@ -514,6 +524,10 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			} else {
 				fmt.Println("Shell commands are now OFF.")
 			}
+			pause(scanner)
+
+		case "15":
+			webLoginMenu(scanner)
 			pause(scanner)
 
 		case "16":
@@ -767,6 +781,16 @@ func setupSSL(cfg *Config, ctrl *webController, scanner *bufio.Scanner, system s
 			return
 		}
 		if strings.ToLower(ans) == "y" || strings.ToLower(ans) == "yes" {
+			if strings.HasPrefix(cert, "/etc/letsencrypt/") {
+				// Root-only key: copy it to ~/.muse99/certs and keep
+				// it in sync on renewal.
+				c, k, err := installUserCerts(domain)
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				cert, key = c, k
+			}
 			cfg.TLSEnabled = true
 			cfg.CertFile, cfg.KeyFile = cert, key
 			saveRuntimeConfig(cfg)
@@ -775,7 +799,7 @@ func setupSSL(cfg *Config, ctrl *webController, scanner *bufio.Scanner, system s
 		return
 	}
 	fmt.Println("No certificate found yet for", domain)
-	fmt.Println("You need: a domain pointing at this server, and ports 80 and 443 open.")
+	fmt.Printf("You need: a domain pointing at this server, port 80 open for the certificate check, and port %d open for the web UI.\n", cfg.WebPort)
 	if _, err := exec.LookPath("certbot"); err != nil {
 		fmt.Println("certbot is not installed. Run these commands on the server:")
 		fmt.Println("  sudo apt update && sudo apt install -y certbot")
@@ -807,16 +831,18 @@ func setupSSL(cfg *Config, ctrl *webController, scanner *bufio.Scanner, system s
 		fmt.Println("Check that the domain points at this server and port 80 is open, then try again.")
 		return
 	}
-	cert, key, ok := findCerts(domain)
-	if !ok {
-		fmt.Println("certbot finished but I cannot find the certificate. Check /etc/letsencrypt/live/" + domain + "/")
+	cert, key, err := installUserCerts(domain)
+	if err != nil {
+		fmt.Println("certbot finished but:", err)
+		fmt.Println("Check /etc/letsencrypt/live/" + domain + "/")
 		return
 	}
+	fmt.Println("Renewal hook installed — renewed certificates are picked up automatically, no restart needed.")
 	cfg.TLSEnabled = true
 	cfg.CertFile, cfg.KeyFile = cert, key
 	saveRuntimeConfig(cfg)
 	fmt.Println("SSL is on — certificate found at", cert)
-	fmt.Println("Restart the web UI (option 4) to serve https://" + domain)
+	fmt.Println("Restart the web UI (option 4) to serve", webAddressFor(*cfg))
 	_ = system
 }
 
