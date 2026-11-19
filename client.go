@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -175,7 +177,7 @@ func NewClientForProvider(baseURL, apiKey, model, provider string) *Client {
 		APIKey:   apiKey,
 		Model:    model,
 		Provider: provider,
-		HTTP:     &http.Client{Timeout: 120 * time.Second},
+		HTTP:     &http.Client{Timeout: modelTimeout()},
 	}
 }
 
@@ -271,4 +273,18 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// modelTimeout is how long one model call may take. Reasoning models
+// (GLM, DeepSeek, o-series) can think for many minutes before the first
+// byte, so the default is 15 minutes. Override with MUSE99_MODEL_TIMEOUT
+// (seconds, 30..7200).
+func modelTimeout() time.Duration {
+	d := 15 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("MUSE99_MODEL_TIMEOUT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 30 && n <= 7200 {
+			d = time.Duration(n) * time.Second
+		}
+	}
+	return d
 }

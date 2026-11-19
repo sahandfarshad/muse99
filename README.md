@@ -92,6 +92,11 @@ The web UI can run commands and holds your API keys, so it is **never served wit
 - 5 wrong passwords from one IP lock that IP out for 15 minutes.
 - Requests from another site are refused (Origin check), so a malicious page cannot drive your Muse99 through your browser.
 - Docker / systemd: set `MUSE99_WEB_USER` and `MUSE99_WEB_PASSWORD` in the environment instead; they override the saved login.
+
+### Timeouts
+
+- Each shell command is killed after 120 s (`MUSE99_SHELL_TIMEOUT`, seconds).
+- Each model call may take up to 15 min, for reasoning models that think long (`MUSE99_MODEL_TIMEOUT`, seconds).
 - `/api/status` answers without a login only with `{"ok":true}`, so the menu and installer can still see the UI is up.
 - The Files tab only opens paths inside the workdir.
 
