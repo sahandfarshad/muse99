@@ -324,7 +324,7 @@ func printUninstallResult(removed, kept []string) {
 		}
 	}
 	fmt.Println("To install again, run the one-line installer:")
-	fmt.Println("  curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash")
+	fmt.Println("  curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | bash")
 }
 
 // runCmd runs a command with output discarded (used for best-effort

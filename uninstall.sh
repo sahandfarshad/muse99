@@ -83,4 +83,4 @@ rmdir "$INSTALL_DIR_ACTUAL" 2>/dev/null && echo "Removed empty install dir: $INS
 
 echo ""
 echo "Muse99 uninstalled."
-echo "To install again: curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash"
+echo "To install again: curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | bash"

@@ -418,7 +418,7 @@ func showMenu(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, 
 			if err := selfUpdate(); err != nil {
 				fmt.Println("Update failed:", err)
 				fmt.Println("You can also run the installer again:")
-				fmt.Println("  curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash")
+				fmt.Println("  curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | bash")
 			} else {
 				fmt.Println("Update done.")
 				// v7: always restart the app after an update, so
@@ -854,7 +854,7 @@ func selfUpdate() error {
 	if arch != "amd64" && arch != "arm64" {
 		return fmt.Errorf("unsupported architecture %s (only amd64/arm64 releases exist)", arch)
 	}
-	url := "https://github.com/sahfar363/muse99/releases/latest/download/muse99-linux-" + arch
+	url := "https://github.com/sahandfarshad/muse99/releases/latest/download/muse99-linux-" + arch
 	fmt.Println("Downloading", url)
 	tmp, err := os.CreateTemp("", "muse99-update-*")
 	if err != nil {

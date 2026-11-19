@@ -2,14 +2,14 @@
 
 Give it a task and it works till the end. Give it a server only if you want it to — then it can work there, for free, on your own machine.
 
-**Repo:** https://github.com/sahfar363/muse99
+**Repo:** https://github.com/sahandfarshad/muse99
 
 Muse99 is not the Muse app itself — that has hosted Gmail/Calendar, wallet, proactivity and Meta's runtime. Muse99 is the full, reproducible production core: same persona, memory, goals, autonomous task loop, sub-agents, tools, web dashboard, SSH menu, remote servers, scheduler, and packaging. Point it at Spark and it is Muse mode. Point it at any other OpenAI-compatible API and it keeps the same behaviour with a different brain.
 
 ## Quick install — Ubuntu server, one line, no compile
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | bash
 ```
 
 That downloads the pre-built binary for your server (amd64 or arm64) from the latest GitHub release and puts it in `~/.local/bin/muse99`. No Go, no clone, no build on the server — GitHub Actions already built it when the release was tagged.
@@ -25,7 +25,7 @@ That is the whole setup. Chat works right after that. (If you run the installer 
 Specific version, or a different install folder:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | bash -s -- --version v0.1.0
 VERSION=v0.1.0 INSTALL_DIR=$HOME/bin bash install.sh
 ```
 
@@ -235,14 +235,14 @@ cp muse99.service ~/.config/systemd/user/muse99.service
 systemctl --user enable --now muse99
 ```
 
-## Push to GitHub — sahfar363/muse99
+## Push to GitHub — sahandfarshad/muse99
 
 ```bash
 git init
 git add .
 git commit -m "Muse99 — full production agent"
 git branch -M main
-git remote add origin https://github.com/sahfar363/muse99.git
+git remote add origin https://github.com/sahandfarshad/muse99.git
 git push -u origin main
 ```
 

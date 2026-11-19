@@ -5,7 +5,7 @@
 # No Go, no clone, no compile on the server.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | bash
 #
 # After installing, the installer starts the web UI (default port 3759)
 # and opens the SSH menu — the web UI link is on top of the menu.
@@ -15,7 +15,7 @@
 # address, and exits instead of hanging.
 #
 # Specific version (a git tag, e.g. v0.1.0):
-#   curl -fsSL https://raw.githubusercontent.com/sahfar363/muse99/main/install.sh | bash -s -- --version v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | bash -s -- --version v0.1.0
 #   VERSION=v0.1.0 bash install.sh
 #
 # Flags: --version TAG | --install-dir DIR | --no-menu | --no-web
@@ -28,7 +28,7 @@
 #   LOCAL_BINARY - dev/test only: install this local file instead of downloading
 set -euo pipefail
 
-REPO="sahfar363/muse99"
+REPO="sahandfarshad/muse99"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${VERSION:-}"
 
