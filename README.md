@@ -153,6 +153,10 @@ Marketplace providers (AiPrime, OpenRouter) price a request by its worst case. W
 
 When the connection drops or the provider is busy (connection reset, timeout, 429, 5xx, "no seller right now"), Muse99 waits and retries: 5 s, 15 s, 30 s, 1 min, 2 min. You see the countdown in Behind the scenes. If it still fails, the steps and files so far are kept; send "continue". Old tool outputs are shortened in what is sent (the chat keeps them whole), so long tasks cost fewer tokens.
 
+## Switch model mid-chat, and a backup model
+
+The model menu at the top of the chat lists the models you used recently. Pick another one at any time: the chat, its steps and files stay, and the next message goes to the new model (send "continue" to carry on). Next to it, **Backup** picks a model that takes over by itself when the main one still fails after its retries; the reply then says it finished with the backup.
+
 ## Web UI — minimal, slick, modern
 
 ```bash

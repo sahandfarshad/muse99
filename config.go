@@ -1,11 +1,11 @@
 package main
 
 import (
-	"regexp"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -50,6 +50,10 @@ type FileConfig struct {
 	// of the password is stored.
 	WebUser     string `json:"web_user,omitempty"`
 	WebPassHash string `json:"web_pass_hash,omitempty"`
+	// v0.9.3: models picked recently (chat model menu) and the backup
+	// model used when the main one keeps failing.
+	RecentModels []ModelRef `json:"recent_models,omitempty"`
+	Fallback     *ModelRef  `json:"fallback,omitempty"`
 }
 
 // Provider presets. All are OpenAI-compatible /chat/completions endpoints,

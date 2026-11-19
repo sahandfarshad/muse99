@@ -256,8 +256,10 @@ func (s *webServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		mode = "Muse Spark — Muse mode"
 	}
 	syncUserName(&s.cfg)
+	recent, fallback := s.modelMenuJSON()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
+		"recent": recent, "fallback": fallback,
 		"model": s.cfg.Model, "mode": mode, "user": s.cfg.UserName,
 		"name_needed": !s.cfg.NameSet, "version": versionLabel(),
 		"workdir": s.cfg.Workdir, "shell": s.runner.shellAllowed(),
@@ -617,6 +619,7 @@ func (s *webServer) handleModelActive(w http.ResponseWriter, r *http.Request) {
 	p.Model = model
 	fc.setProvider(p)
 	fc.ActiveProvider = name
+	fc.noteRecentModel(name, model)
 	_ = saveFileConfig(fc)
 	active := fc.activeProvider()
 	s.cfg.Provider = active.Name
@@ -727,7 +730,7 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	before := len(s.messages)
 	refreshSystemFor(&s.cfg, &s.messages, req.Message)
 	usageBefore := loadUsage()
-	reply, tools := runTurnDetailed(s.client, s.runner, s.tools, &s.messages, req.Message)
+	reply, tools := runTurnFallback(s.client, s.fallbackClient(), s.runner, s.tools, &s.messages, req.Message)
 	var turnUsage *usageDelta
 	if d := diffUsage(usageBefore, loadUsage()); d.Calls > 0 {
 		if d.Model == "" {
@@ -1027,6 +1030,7 @@ func buildMux(s *webServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/models/fallback", s.handleModelFallback)
 	mux.HandleFunc("/api/memory", s.handleMemory)
 	mux.HandleFunc("/api/clear", s.handleClear)
 	mux.HandleFunc("/api/chat", s.handleChat)
@@ -1095,6 +1099,7 @@ aside{position:fixed;left:0;top:0;bottom:0;width:var(--side);padding:18px 14px 1
 header{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 86%,transparent);backdrop-filter:blur(12px)}
 .topbar{display:flex;gap:10px;align-items:center;padding:14px 28px;flex-wrap:wrap}
 #pagetitle{font-weight:600;font-size:15px;margin-right:6px}
+select.pill{appearance:auto;cursor:pointer;font:inherit;font-size:12.5px;color:var(--ink2);background:var(--surface);border:1px solid var(--line);padding:4px 8px;max-width:240px}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;background:var(--surface);border:1px solid var(--line);font-size:12.5px;color:var(--ink2);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pill.model::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(61,122,82,.15);flex:none}
 .pill.spark{background:none;border-color:transparent;color:var(--muted)}
@@ -1220,7 +1225,7 @@ h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
 <div class="me"><span class="av">✦</span><span id="me-name">Muse99</span><a href="/logout">Log out</a></div>
 </aside>
 <div class="page">
-<header><div class="topbar"><span id="pagetitle">Chat</span><span class="pill spark" id="mode">…</span><span class="spacer"></span><span class="pill model" id="model"></span><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust.">Shell <input type="checkbox" id="shell-toggle" onchange="toggleShell()"></label><button class="iconbtn" id="actbtn" onclick="toggleActivity()" title="See what Muse99 is doing step by step">◧ Behind the scenes</button><button class="iconbtn" onclick="clearChat()">Clear</button></div></header>
+<header><div class="topbar"><span id="pagetitle">Chat</span><span class="pill spark" id="mode">…</span><span class="spacer"></span><select class="pill model" id="model" onchange="pickModel(this.value)" title="Model for this chat. Switch any time: the chat and its steps stay, the next message goes to the new model."></select><select class="pill" id="backup" onchange="pickBackup(this.value)" title="Backup model: used automatically when the main model still fails after retries."></select><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust.">Shell <input type="checkbox" id="shell-toggle" onchange="toggleShell()"></label><button class="iconbtn" id="actbtn" onclick="toggleActivity()" title="See what Muse99 is doing step by step">◧ Behind the scenes</button><button class="iconbtn" onclick="clearChat()">Clear</button></div></header>
 <div id="taskbar" class="taskbar" style="display:none" onclick="showTasksTab()"></div>
 <main>
 <div id="pane-chat" class="pane active"><div id="nokey" class="card" style="display:none;margin-top:18px"><h3>Add an API key to start</h3><p class="sub">Muse99 needs a provider key before it can chat. It takes a minute, right here — no terminal.</p><button class="btn primary" onclick="showSettingsTab()">Open Settings</button></div><div id="chat"></div><div id="thinking">Muse99 is working…</div></div>
@@ -1304,7 +1309,10 @@ async function loadMemories(){const r=await fetch('/api/memories');const j=await
 async function deleteMemory(id){await fetch('/api/memories/'+id,{method:'DELETE'});loadMemories();}
 async function summariseChat(){const r=await fetch('/api/chats/'+(currentChatId||'')+'/summarise',{method:'POST'});const j=await r.json();toast('Saved '+(j.saved||0)+' new fact(s) to memory');loadMemories();}
 async function toggleShell(){const on=document.getElementById('shell-toggle').checked;await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow_shell:on})});document.getElementById('shellbox').classList.toggle('on',on);loadStatus();}
-async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;document.getElementById('model').textContent=s.model;{const mn=document.getElementById('me-name');if(mn&&s.user)mn.textContent=s.user;const av=document.querySelector?document.querySelector('.me .av'):null;if(av&&s.user)av.textContent=s.user.trim().charAt(0).toUpperCase();}if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);{const v=document.getElementById('ver');if(v)v.textContent=s.version||'';}if(s.name_needed){const nb=document.getElementById('namebox');if(nb.style.display==='none'){nb.style.display='flex';setTimeout(()=>document.getElementById('name-in').focus(),50);}}else{welcome(s.user);}const nk=document.getElementById('nokey');if(nk){nk.style.display=s.api_key_set?'none':'block';}const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
+function fillModels(s){const sel=document.getElementById('model'),bk=document.getElementById('backup');if(!sel||!bk||sel.tagName!=='SELECT')return;if(document.activeElement===sel||document.activeElement===bk)return;const list=(s.recent||[]).slice();if(s.model&&!list.some(m=>m.provider===s.provider&&m.model===s.model))list.unshift({provider:s.provider,model:s.model});window._models=list;sel.innerHTML='';bk.innerHTML='';const n=document.createElement('option');n.value='-1';n.textContent='Backup: none';bk.appendChild(n);list.forEach((m,i)=>{const lab=m.model+' · '+m.provider;const o=document.createElement('option');o.value=String(i);o.textContent=lab;if(m.provider===s.provider&&m.model===s.model)o.selected=true;sel.appendChild(o);const b=document.createElement('option');b.value=String(i);b.textContent='Backup: '+lab;if(s.fallback&&s.fallback.provider===m.provider&&s.fallback.model===m.model)b.selected=true;bk.appendChild(b);});const more=document.createElement('option');more.value='more';more.textContent='+ Other model… (Settings)';sel.appendChild(more);}
+async function pickModel(v){if(v==='more'){showSettingsTab();loadStatus();return;}const m=(window._models||[])[+v];if(!m)return;try{const r=await fetch('/api/models/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:m.provider,model:m.model})});const j=await r.json();if(j.ok){toast('Now using '+m.model+'. Send "continue" to carry on in this chat.');}else{toast('Could not switch: '+(j.error||'error'),'err');}}catch(e){toast('Could not switch: '+e,'err');}document.getElementById('model').blur();loadStatus();}
+async function pickBackup(v){const m=(window._models||[])[+v];const body=m?{provider:m.provider,model:m.model}:{provider:'',model:''};try{const r=await fetch('/api/models/fallback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();toast(j.ok?(m?'Backup model: '+m.model:'Backup model off'):'Could not save: '+(j.error||'error'),j.ok?'':'err');}catch(e){toast('Could not save: '+e,'err');}document.getElementById('backup').blur();loadStatus();}
+async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;fillModels(s);{const mn=document.getElementById('me-name');if(mn&&s.user)mn.textContent=s.user;const av=document.querySelector?document.querySelector('.me .av'):null;if(av&&s.user)av.textContent=s.user.trim().charAt(0).toUpperCase();}if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);{const v=document.getElementById('ver');if(v)v.textContent=s.version||'';}if(s.name_needed){const nb=document.getElementById('namebox');if(nb.style.display==='none'){nb.style.display='flex';setTimeout(()=>document.getElementById('name-in').focus(),50);}}else{welcome(s.user);}const nk=document.getElementById('nokey');if(nk){nk.style.display=s.api_key_set?'none':'block';}const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
 loadChats();
 document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;add(v,'user');inp.value='';think.textContent='Muse99 is working…';think.style.display='block';actBusy=true;pollActivity();try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';actBusy=false;pollActivity();add(j.reply||j.error||'(no reply)','muse',j.tools,j.usage);loadStatus();}catch(err){think.style.display='none';actBusy=false;add('Could not reach server: '+err,'muse');}});
 async function clearChat(){await fetch('/api/clear',{method:'POST'});chat.innerHTML='';add('Chat cleared. Memory is kept.','muse');}

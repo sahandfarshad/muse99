@@ -349,6 +349,14 @@ func runTurn(client *Client, runner *toolRunner, tools []ToolDef, messages *[]Me
 }
 
 func runTurnDetailed(client *Client, runner *toolRunner, tools []ToolDef, messages *[]Message, input string) (string, []string) {
+	return runTurnFallback(client, nil, runner, tools, messages, input)
+}
+
+// runTurnFallback is runTurnDetailed with a backup model: when the
+// main model still fails after its retries, the same step is sent to
+// the backup and the rest of the turn stays on it.
+func runTurnFallback(client, fallback *Client, runner *toolRunner, tools []ToolDef, messages *[]Message, input string) (string, []string) {
+	switchedFrom := ""
 	*messages = append(*messages, Message{Role: "user", Content: input})
 	var used []string
 	activity.add("chat", "user", "New message", input, false)
@@ -358,6 +366,13 @@ func runTurnDetailed(client *Client, runner *toolRunner, tools []ToolDef, messag
 		msg, err := client.Chat(*messages, tools)
 		if err != nil {
 			activity.finish(aid, false, "Model call failed", err.Error())
+			if fallback != nil && switchedFrom == "" {
+				activity.add("chat", "retry", "Switching to backup model "+fallback.Model, client.Model+" failed: "+err.Error(), false)
+				switchedFrom = client.Model
+				client = fallback
+				step--
+				continue
+			}
 			if len(used) > 0 {
 				return "Sorry — I lost the API after " + fmt.Sprint(len(used)) + " tool steps: " + err.Error() + "\n\nNothing is lost: the files written so far are on disk and the steps are saved in this chat. Send \"continue\" and I'll pick up where I stopped.", used
 			}
@@ -372,6 +387,9 @@ func runTurnDetailed(client *Client, runner *toolRunner, tools []ToolDef, messag
 				return "(no reply)", used
 			}
 			activity.add("chat", "done", "Answer sent to chat", "", false)
+			if switchedFrom != "" {
+				return "↪ " + switchedFrom + " kept failing, so I finished with the backup model " + client.Model + ".\n\n" + msg.Content, used
+			}
 			return msg.Content, used
 		}
 
