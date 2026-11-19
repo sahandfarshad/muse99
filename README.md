@@ -143,6 +143,14 @@ Provider quirks:
 
 The same thing is in the SSH menu, Providers (option 9): **l** lists the current provider's models and lets you pick one by number, **t** tests a model. API endpoints, for scripts: `GET /api/models?provider=spark`, `POST /api/models/refresh {provider, base_url, api_key}`, `POST /api/models/test {provider|base_url, api_key, model}` → `{ok, model, latency_ms, reply, error}`, `POST /api/models/active {provider|base_url, api_key, model}` → `{ok, model, provider}`.
 
+## Behind the scenes — see every step
+
+Press **◧ Behind the scenes** at the top of the chat. A panel opens on the right and shows, live, what Muse99 is doing: waiting for the model (with a running timer), the model's thinking when the provider sends it, which tool it wants, the exact command and its output, retries, and errors. While you wait, the "working" line under the chat also says the current step, so you can tell "still thinking" from "stuck". The panel keeps the last 400 steps in memory only; keys and tokens are hidden.
+
+Settings: **Save settings** is pinned at the top, and saving shows a short note that fades away.
+
+Marketplace providers (AiPrime, OpenRouter) price a request by its worst case. When one answers "No seller can serve this model at an affordable price" for the reply budget, Muse99 retries with 2048, then 512, then no limit, and keeps what worked. Model tests use a small budget.
+
 ## Web UI — minimal, slick, modern
 
 ```bash

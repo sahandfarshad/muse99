@@ -473,11 +473,17 @@ func testModel(baseURL, apiKey, model, provider string) (reply string, latencyMs
 		return "", 0, fmt.Errorf("this provider needs an API key — add one in Settings first")
 	}
 	c := NewClientForProvider(base, apiKey, model, provider)
-	c.HTTP.Timeout = 60 * time.Second
+	c.HTTP.Timeout = 90 * time.Second
+	// A test needs only a word back: ask for a small budget so price-
+	// checking routers (AiPrime, OpenRouter) do not refuse it.
+	c.MaxTokens = 1024
 	start := time.Now()
 	msg, err := c.Chat([]Message{{Role: "user", Content: "Reply with the single word OK"}}, nil)
 	latencyMs = time.Since(start).Milliseconds()
 	if err != nil {
+		if strings.Contains(err.Error(), "whole token budget") {
+			return "(reachable — it spent the short test budget thinking)", latencyMs, nil
+		}
 		return "", latencyMs, err
 	}
 	reply = strings.TrimSpace(msg.Content)

@@ -1,0 +1,62 @@
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestBudgetRetryAndActivity(t *testing.T) {
+	var seen []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var req struct {
+			Max int `json:"max_completion_tokens"`
+		}
+		_ = json.Unmarshal(b, &req)
+		seen = append(seen, req.Max)
+		if req.Max > 2048 {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":{"message":"No seller can serve this model at an affordable price right now."}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"OK","reasoning_content":"thinking"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("HOME", t.TempDir())
+	c := NewClientForProvider(srv.URL, "k", "m", "custom")
+	msg, err := c.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil || msg.Content != "OK" || msg.Reasoning != "thinking" {
+		t.Fatalf("got %+v %v", msg, err)
+	}
+	if c.MaxTokens != 2048 || len(seen) != 2 {
+		t.Fatalf("budget not lowered: %v %d", seen, c.MaxTokens)
+	}
+	if _, err := c.Chat([]Message{{Role: "user", Content: "hi"}}, nil); err != nil || seen[len(seen)-1] != 2048 {
+		t.Fatalf("not sticky: %v", seen)
+	}
+	evs, _ := activity.since(0)
+	found := false
+	for _, e := range evs {
+		if e.Kind == "retry" && strings.Contains(e.Title, "2048") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no retry event")
+	}
+	b, _ := json.Marshal(msg)
+	if strings.Contains(string(b), "thinking") {
+		t.Fatal("reasoning must not be sent back")
+	}
+}
+
+func TestRedactActivity(t *testing.T) {
+	s := redactActivity(`curl -H "Authorization: Bearer abcdefghijklmnop123" key=sk-abcdefghijklmnopqrstu`)
+	if strings.Contains(s, "abcdefghijklmnop123") || strings.Contains(s, "sk-abcdefghijklmnopqrstu") {
+		t.Fatal(s)
+	}
+}

@@ -347,25 +347,33 @@ func runTurn(client *Client, runner *toolRunner, tools []ToolDef, messages *[]Me
 func runTurnDetailed(client *Client, runner *toolRunner, tools []ToolDef, messages *[]Message, input string) (string, []string) {
 	*messages = append(*messages, Message{Role: "user", Content: input})
 	var used []string
+	activity.add("chat", "user", "New message", input, false)
 
 	for step := 0; step < 20; step++ {
+		aid := activity.add("chat", "model", fmt.Sprintf("Waiting for %s (step %d, %d messages)…", client.Model, step+1, len(*messages)), "", true)
 		msg, err := client.Chat(*messages, tools)
 		if err != nil {
+			activity.finish(aid, false, "Model call failed", err.Error())
 			return "Sorry — I couldn't reach the API: " + err.Error(), used
 		}
+		t, d := describeReply(msg)
+		activity.finish(aid, true, t, d)
 		*messages = append(*messages, msg)
 
 		if len(msg.ToolCalls) == 0 {
 			if strings.TrimSpace(msg.Content) == "" {
 				return "(no reply)", used
 			}
+			activity.add("chat", "done", "Answer sent to chat", "", false)
 			return msg.Content, used
 		}
 
 		for _, tc := range msg.ToolCalls {
 			used = append(used, tc.Function.Name)
 			fmt.Printf("  [tool] %s %s\n", tc.Function.Name, truncate(tc.Function.Arguments, 200))
+			tid := activity.add("chat", "tool", "Running "+tc.Function.Name+"…", prettyToolArgs(tc.Function.Arguments), true)
 			result := runner.run(tc.Function.Name, tc.Function.Arguments)
+			activity.finish(tid, true, "Ran "+tc.Function.Name, prettyToolArgs(tc.Function.Arguments)+"\n\n→ "+truncate(result, 2500))
 			*messages = append(*messages, Message{
 				Role:       "tool",
 				Content:    result,
@@ -373,6 +381,7 @@ func runTurnDetailed(client *Client, runner *toolRunner, tools []ToolDef, messag
 			})
 		}
 	}
+	activity.add("chat", "error", "Stopped after 20 tool steps", "", false)
 	return "I did a lot of tool steps and stopped — try breaking the task into smaller pieces.", used
 }
 

@@ -77,10 +77,17 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 	var lastReply string
 
 	for step := 0; step < maxAutonomousSteps; step++ {
+		src := "task " + task.ID
+		aid := activity.add(src, "model", fmt.Sprintf("Waiting for %s (task step %d)…", client.Model, step+1), "", true)
 		msg, err := client.Chat(messages, tools)
 		if err != nil {
+			activity.finish(aid, false, "Model call failed", err.Error())
 			updateTask(task.ID, "failed", "API error: "+err.Error(), steps)
 			return finish("Task failed — API error: " + err.Error())
+		}
+		{
+			t, d := describeReply(msg)
+			activity.finish(aid, true, t, d)
 		}
 		messages = append(messages, msg)
 		_ = saveSession(task.ID, messages)
@@ -110,7 +117,9 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 			steps = append(steps, tc.Function.Name)
 			fmt.Printf("  [%d] [tool] %s %s\n", step+1, tc.Function.Name, truncate(tc.Function.Arguments, 200))
 			updateTask(task.ID, "running", fmt.Sprintf("step %d: %s", len(steps), tc.Function.Name), steps)
+			tid := activity.add(src, "tool", "Running "+tc.Function.Name+"…", prettyToolArgs(tc.Function.Arguments), true)
 			result := runner.run(tc.Function.Name, tc.Function.Arguments)
+			activity.finish(tid, true, "Ran "+tc.Function.Name, prettyToolArgs(tc.Function.Arguments)+"\n\n→ "+truncate(result, 2500))
 			messages = append(messages, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
 		}
 		// Small pause so a runaway loop is visible and rate limits are respected.

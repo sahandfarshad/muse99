@@ -109,6 +109,9 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`
+	// Reasoning is the model's visible thinking (reasoning_content /
+	// reasoning), shown in the activity panel only; never sent back.
+	Reasoning string `json:"-"`
 }
 
 type ToolDef struct {
@@ -156,6 +159,14 @@ type Client struct {
 	// flattenTools: this provider rejected native tool history once,
 	// so tool steps are sent as plain text from then on.
 	flattenTools bool
+	// MaxTokens overrides the reply budget for this client (0 = the
+	// default, MUSE99_MAX_TOKENS or 8192). Set lower automatically when
+	// a marketplace router (AiPrime, OpenRouter) refuses the request
+	// because the worst-case price of that many tokens is too high.
+	MaxTokens int
+	// noMaxTokens: the provider only accepted the request without a
+	// max token field at all.
+	noMaxTokens bool
 }
 
 func NewClient(baseURL, apiKey, model string) *Client {
@@ -220,6 +231,12 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	if isSpark(c.BaseURL, c.Model) && reqBody.MaxTokens < 8192 {
 		reqBody.MaxTokens = 8192
 	}
+	if c.MaxTokens > 0 {
+		reqBody.MaxTokens = c.MaxTokens
+	}
+	if c.noMaxTokens {
+		reqBody.MaxTokens = 0
+	}
 
 	if c.flattenTools && hasToolSteps(sent) {
 		reqBody.Messages = flattenToolHistory(sent)
@@ -275,6 +292,7 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	// every provider accepts. The model can still call tools again.
 	if statusCode == 400 && !c.flattenTools && hasToolSteps(sent) {
 		saveBadRequest(reqBody, body)
+		activity.add("", "retry", "Provider rejected the tool history (400) — retrying with tool steps as plain text", truncate(string(body), 600), false)
 		reqBody.Messages = flattenToolHistory(sent)
 		if d, merr := json.Marshal(reqBody); merr == nil {
 			data = d
@@ -283,6 +301,41 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 				if rs < 400 {
 					c.flattenTools = true // keep doing this for this provider
 				}
+			}
+		}
+	}
+	// v0.9: marketplace routers price a request by its worst case
+	// (input + max tokens). With a big budget they answer "No seller
+	// can serve this model at an affordable price" (or 402 / "more
+	// credits") even though a normal request works. Retry with a
+	// smaller budget, then with none, and keep what worked.
+	if statusCode >= 400 && looksLikeBudgetError(statusCode, body) && reqBody.MaxTokens > 0 {
+		for _, n := range []int{2048, 512, 0} {
+			if n != 0 && n >= reqBody.MaxTokens {
+				continue
+			}
+			activity.add("", "retry", fmt.Sprintf("Provider refused the price of %d max tokens — retrying with %s", reqBody.MaxTokens, budgetLabel(n)), truncate(string(body), 400), false)
+			reqBody.MaxTokens = n
+			d, merr := json.Marshal(reqBody)
+			if merr != nil {
+				break
+			}
+			data = d
+			rb, rs, rerr := doChat(false)
+			if rerr != nil {
+				break
+			}
+			body, statusCode = rb, rs
+			if rs < 400 {
+				if n == 0 {
+					c.noMaxTokens = true
+				} else {
+					c.MaxTokens = n
+				}
+				break
+			}
+			if !looksLikeBudgetError(rs, rb) {
+				break
 			}
 		}
 	}
@@ -305,6 +358,20 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 		recordUsageFor(c.Provider, c.Model, out.Usage.PromptTokens, out.Usage.CompletionTokens)
 	}
 	msg := out.Choices[0].Message
+	var rs struct {
+		Choices []struct {
+			Message struct {
+				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(body, &rs) == nil && len(rs.Choices) > 0 {
+		msg.Reasoning = rs.Choices[0].Message.ReasoningContent
+		if msg.Reasoning == "" {
+			msg.Reasoning = rs.Choices[0].Message.Reasoning
+		}
+	}
 	if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 && out.Choices[0].FinishReason == "length" {
 		return Message{}, fmt.Errorf("the model used its whole token budget (%d) thinking and wrote no answer — raise MUSE99_MAX_TOKENS or pick a non-reasoning model", reqBody.MaxTokens)
 	}
@@ -537,4 +604,26 @@ func saveBadRequest(req chatRequest, resp []byte) {
 		_ = os.MkdirAll(dir, 0o700)
 		_ = os.WriteFile(filepath.Join(dir, "last_bad_request.json"), b, 0o600)
 	}
+}
+
+// looksLikeBudgetError: the provider refused because of price or
+// credit for the requested token budget, not because of the request.
+func looksLikeBudgetError(status int, body []byte) bool {
+	if status == 402 {
+		return true
+	}
+	b := strings.ToLower(string(body))
+	for _, k := range []string{"affordable", "more credits", "can only afford", "insufficient credit", "insufficient balance", "max_tokens", "max_completion_tokens", "maximum context length"} {
+		if strings.Contains(b, k) {
+			return true
+		}
+	}
+	return false
+}
+
+func budgetLabel(n int) string {
+	if n == 0 {
+		return "no max token limit"
+	}
+	return fmt.Sprintf("%d max tokens", n)
 }
