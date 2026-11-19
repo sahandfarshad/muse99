@@ -477,6 +477,7 @@ func testModel(baseURL, apiKey, model, provider string) (reply string, latencyMs
 	// A test needs only a word back: ask for a small budget so price-
 	// checking routers (AiPrime, OpenRouter) do not refuse it.
 	c.MaxTokens = 1024
+	c.NoRetry = true
 	start := time.Now()
 	msg, err := c.Chat([]Message{{Role: "user", Content: "Reply with the single word OK"}}, nil)
 	latencyMs = time.Since(start).Milliseconds()

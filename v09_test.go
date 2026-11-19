@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBudgetRetryAndActivity(t *testing.T) {
@@ -78,5 +79,46 @@ func TestScrubLegacyName(t *testing.T) {
 	}
 	if !isLegacyName(strings.ToLower(legacyDefaultName)) {
 		t.Fatal("case")
+	}
+}
+
+func TestChatWaitsThroughOutage(t *testing.T) {
+	old := retryDelays
+	retryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { retryDelays = old }()
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n <= 2 {
+			w.WriteHeader(503)
+			_, _ = w.Write([]byte(`{"error":{"message":"overloaded, try again"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("HOME", t.TempDir())
+	c := NewClientForProvider(srv.URL, "k", "m", "custom")
+	msg, err := c.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil || msg.Content != "OK" || n != 3 {
+		t.Fatalf("n=%d %v %+v", n, err, msg)
+	}
+	c2 := NewClientForProvider(srv.URL, "k", "m", "custom")
+	n = 0
+	c2.NoRetry = true
+	if _, err := c2.Chat([]Message{{Role: "user", Content: "hi"}}, nil); err == nil {
+		t.Fatal("NoRetry should fail fast")
+	}
+}
+
+func TestClipOldToolResults(t *testing.T) {
+	var msgs []Message
+	big := strings.Repeat("x", 5000)
+	for i := 0; i < 12; i++ {
+		msgs = append(msgs, Message{Role: "tool", Content: big, ToolCallID: "c"})
+	}
+	out := clipOldToolResults(msgs)
+	if len(out[0].Content) >= 5000 || len(out[11].Content) != 5000 || len(msgs[0].Content) != 5000 {
+		t.Fatal("clip wrong")
 	}
 }

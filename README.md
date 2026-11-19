@@ -151,6 +151,8 @@ Settings: **Save settings** is pinned at the top, and saving shows a short note 
 
 Marketplace providers (AiPrime, OpenRouter) price a request by its worst case. When one answers "No seller can serve this model at an affordable price" for the reply budget, Muse99 retries with 2048, then 512, then no limit, and keeps what worked. Model tests use a small budget.
 
+When the connection drops or the provider is busy (connection reset, timeout, 429, 5xx, "no seller right now"), Muse99 waits and retries: 5 s, 15 s, 30 s, 1 min, 2 min. You see the countdown in Behind the scenes. If it still fails, the steps and files so far are kept; send "continue". Old tool outputs are shortened in what is sent (the chat keeps them whole), so long tasks cost fewer tokens.
+
 ## Web UI — minimal, slick, modern
 
 ```bash

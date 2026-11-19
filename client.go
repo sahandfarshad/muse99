@@ -159,6 +159,9 @@ type Client struct {
 	// flattenTools: this provider rejected native tool history once,
 	// so tool steps are sent as plain text from then on.
 	flattenTools bool
+	// NoRetry: fail at once instead of waiting out network or
+	// provider hiccups (model tests).
+	NoRetry bool
 	// MaxTokens overrides the reply budget for this client (0 = the
 	// default, MUSE99_MAX_TOKENS or 8192). Set lower automatically when
 	// a marketplace router (AiPrime, OpenRouter) refuses the request
@@ -199,7 +202,7 @@ func NewClientForProvider(baseURL, apiKey, model, provider string) *Client {
 	}
 }
 
-func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
+func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) {
 	// Gemini 3/4 thought signatures: a tool call the model made must
 	// come back with its signature, or the next turn 400s. Fill the
 	// documented bypass only where a signature is genuinely missing
@@ -216,7 +219,7 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	// tool_call_id", Gemini: INVALID_ARGUMENT). Repair ids in place,
 	// and send a cleaned copy where tool calls and results pair up.
 	fillToolCallIDs(messages)
-	sent := sanitizeToolHistory(messages)
+	sent := clipOldToolResults(sanitizeToolHistory(messages))
 	if isGeminiBase(c.BaseURL, c.Provider) {
 		nameToolResults(sent)
 	}
@@ -310,7 +313,7 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	// credits") even though a normal request works. Retry with a
 	// smaller budget, then with none, and keep what worked.
 	if statusCode >= 400 && looksLikeBudgetError(statusCode, body) && reqBody.MaxTokens > 0 {
-		for _, n := range []int{2048, 512, 0} {
+		for _, n := range []int{2048} {
 			if n != 0 && n >= reqBody.MaxTokens {
 				continue
 			}
@@ -626,4 +629,59 @@ func budgetLabel(n int) string {
 		return "no max token limit"
 	}
 	return fmt.Sprintf("%d max tokens", n)
+}
+
+// retryDelays is how long Chat waits before each retry when the
+// connection drops or the provider is busy. About 4 minutes in all,
+// so a short outage does not throw away a long task.
+var retryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second, 120 * time.Second}
+
+// Chat sends one request, waiting and retrying through network drops,
+// timeouts, rate limits, 5xx and "no seller right now" answers.
+// A real error (bad key, bad request) returns at once.
+func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
+	for attempt := 0; ; attempt++ {
+		msg, err := c.chatOnce(messages, tools)
+		if err == nil || c.NoRetry || !isTransientError(err) || attempt >= len(retryDelays) {
+			if err != nil && attempt > 0 {
+				err = fmt.Errorf("%w (gave up after %d retries)", err, attempt)
+			}
+			return msg, err
+		}
+		d := retryDelays[attempt]
+		id := activity.add("", "retry", fmt.Sprintf("Connection or provider problem — waiting %s, then retry %d of %d…", d, attempt+1, len(retryDelays)), err.Error(), true)
+		time.Sleep(d)
+		activity.finish(id, true, fmt.Sprintf("Waited %s, retrying (%d of %d)", d, attempt+1, len(retryDelays)), "")
+	}
+}
+
+// isTransientError: worth waiting and trying again.
+func isTransientError(err error) bool {
+	e := strings.ToLower(err.Error())
+	for _, k := range []string{"connection reset", "connection refused", "broken pipe", "eof", "timeout", "deadline exceeded",
+		"no such host", "temporary failure", "tls handshake", "network is unreachable",
+		"api error 429", "api error 500", "api error 502", "api error 503", "api error 504", "api error 520", "api error 522", "api error 524", "api error 529",
+		"rate limit", "overloaded", "try again", "retry in a minute", "affordable", "server is busy", "bad api response (5", "bad api response (429"} {
+		if strings.Contains(e, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// clipOldToolResults shortens long tool outputs except the last few,
+// on the copy that is sent (the saved history keeps them whole).
+// Every request re-sends the whole conversation, so a long task paid
+// for old file dumps again on every step.
+func clipOldToolResults(msgs []Message) []Message {
+	const keepLast = 8
+	const maxOld = 1500
+	out := make([]Message, len(msgs))
+	copy(out, msgs)
+	for i := 0; i < len(out)-keepLast; i++ {
+		if out[i].Role == "tool" && len(out[i].Content) > maxOld {
+			out[i].Content = out[i].Content[:maxOld] + fmt.Sprintf("\n…[%d more characters cut from this old tool output to save tokens; run the tool again if you need it]", len(out[i].Content)-maxOld)
+		}
+	}
+	return out
 }

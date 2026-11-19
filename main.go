@@ -358,6 +358,9 @@ func runTurnDetailed(client *Client, runner *toolRunner, tools []ToolDef, messag
 		msg, err := client.Chat(*messages, tools)
 		if err != nil {
 			activity.finish(aid, false, "Model call failed", err.Error())
+			if len(used) > 0 {
+				return "Sorry — I lost the API after " + fmt.Sprint(len(used)) + " tool steps: " + err.Error() + "\n\nNothing is lost: the files written so far are on disk and the steps are saved in this chat. Send \"continue\" and I'll pick up where I stopped.", used
+			}
 			return "Sorry — I couldn't reach the API: " + err.Error(), used
 		}
 		t, d := describeReply(msg)
