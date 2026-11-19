@@ -100,6 +100,7 @@ The web UI can run commands and holds your API keys, so it is **never served wit
 
 - Each shell command is killed after 120 s (`MUSE99_SHELL_TIMEOUT`, seconds).
 - Each model call may take up to 15 min, for reasoning models that think long (`MUSE99_MODEL_TIMEOUT`, seconds).
+- Each reply may use up to 8192 tokens, thinking included (`MUSE99_MAX_TOKENS`). If a reasoning model spends it all thinking, Muse99 says so instead of showing an empty reply.
 - `/api/status` answers without a login only with `{"ok":true}`, so the menu and installer can still see the UI is up.
 - The Files tab only opens paths inside the workdir.
 

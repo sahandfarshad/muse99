@@ -130,7 +130,8 @@ type chatRequest struct {
 
 type chatResponse struct {
 	Choices []struct {
-		Message Message `json:"message"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -213,10 +214,10 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 		Messages:    sent,
 		Tools:       tools,
 		Temperature: 0.7,
-		MaxTokens:   4096,
+		MaxTokens:   maxTokens(),
 	}
 	// Spark reasons before answering; those tokens count toward the limit.
-	if isSpark(c.BaseURL, c.Model) {
+	if isSpark(c.BaseURL, c.Model) && reqBody.MaxTokens < 8192 {
 		reqBody.MaxTokens = 8192
 	}
 
@@ -303,7 +304,38 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	if out.Usage != nil {
 		recordUsageFor(c.Provider, c.Model, out.Usage.PromptTokens, out.Usage.CompletionTokens)
 	}
-	return out.Choices[0].Message, nil
+	msg := out.Choices[0].Message
+	if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 && out.Choices[0].FinishReason == "length" {
+		return Message{}, fmt.Errorf("the model used its whole token budget (%d) thinking and wrote no answer — raise MUSE99_MAX_TOKENS or pick a non-reasoning model", reqBody.MaxTokens)
+	}
+	return msg, nil
+}
+
+// maxTokens is the most a model may write in one reply, thinking
+// included. Reasoning models spend a lot of it before answering, so
+// the default is 8192. Override with MUSE99_MAX_TOKENS (256..200000).
+func maxTokens() int {
+	n := 8192
+	if v := strings.TrimSpace(os.Getenv("MUSE99_MAX_TOKENS")); v != "" {
+		if x, err := strconv.Atoi(v); err == nil && x >= 256 && x <= 200000 {
+			n = x
+		}
+	}
+	return n
+}
+
+// MarshalJSON always sends content for assistant messages with tool
+// calls (as ""), since some providers reject a missing content field
+// ("text content parts must carry a string text").
+func (m Message) MarshalJSON() ([]byte, error) {
+	type plain Message
+	if m.Role == "assistant" && len(m.ToolCalls) > 0 && m.Content == "" {
+		return json.Marshal(struct {
+			plain
+			Content string `json:"content"`
+		}{plain(m), ""})
+	}
+	return json.Marshal(plain(m))
 }
 
 func min(a, b int) int {
@@ -403,6 +435,9 @@ func sanitizeToolHistory(messages []Message) []Message {
 			out = append(out, Message{Role: "user", Content: "[earlier tool result]\n" + m.Content})
 		case "assistant":
 			closeOpen()
+			if len(m.ToolCalls) == 0 && strings.TrimSpace(m.Content) == "" {
+				continue // an empty reply stored earlier: providers reject it
+			}
 			if len(m.ToolCalls) > 0 {
 				open = map[string]bool{}
 				for _, tc := range m.ToolCalls {
@@ -413,6 +448,9 @@ func sanitizeToolHistory(messages []Message) []Message {
 			out = append(out, m)
 		default:
 			closeOpen()
+			if (m.Role == "user" || m.Role == "assistant") && strings.TrimSpace(m.Content) == "" {
+				continue // an empty reply stored earlier: providers reject it
+			}
 			out = append(out, m)
 		}
 	}

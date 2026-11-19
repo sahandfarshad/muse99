@@ -234,3 +234,21 @@ func TestToolHistory400FallsBackToText(t *testing.T) {
 		t.Fatalf("second call: %v calls=%d", err, calls)
 	}
 }
+
+func TestEmptyMessagesAndContentField(t *testing.T) {
+	var tc ToolCall
+	tc.ID, tc.Function.Name = "a", "run_shell"
+	out := sanitizeToolHistory([]Message{{Role: "user", Content: "hi"}, {Role: "assistant"}, {Role: "user", Content: "again"},
+		{Role: "assistant", ToolCalls: []ToolCall{tc}}, {Role: "tool", ToolCallID: "a", Content: "ok"}})
+	if len(out) != 4 {
+		t.Fatalf("empty assistant should be dropped: %+v", out)
+	}
+	b, _ := json.Marshal(out[2])
+	if !strings.Contains(string(b), `"content":""`) {
+		t.Fatalf("tool-call message must carry content: %s", b)
+	}
+	b, _ = json.Marshal(Message{Role: "tool", ToolCallID: "a"})
+	if strings.Contains(string(b), `"content"`) && !strings.Contains(string(b), `"tool_call_id":"a"`) {
+		t.Fatalf("marshal broke: %s", b)
+	}
+}
