@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -193,5 +195,42 @@ func TestProviderKeysSurviveSwitching(t *testing.T) {
 	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/settings", nil))
 	if !strings.Contains(rr.Body.String(), `"name":"glm"`) {
 		t.Fatalf("settings should list glm: %s", rr.Body.String())
+	}
+}
+
+func TestToolHistory400FallsBackToText(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var req chatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "tool" || len(m.ToolCalls) > 0 {
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`[{"error":{"code":400,"message":"Request contains an invalid argument.","status":"INVALID_ARGUMENT"}}]`))
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`))
+	}))
+	defer srv.Close()
+	c := NewClientForProvider(srv.URL, "k", "gemini-3.5-flash-lite", "gemini")
+	var tc ToolCall
+	tc.ID, tc.Function.Name, tc.Function.Arguments = "a1", "run_shell", `{"command":"ls"}`
+	msgs := []Message{{Role: "user", Content: "hi"}, {Role: "assistant", ToolCalls: []ToolCall{tc}}, {Role: "tool", ToolCallID: "a1", Content: "x"}}
+	m, err := c.Chat(msgs, nil)
+	if err != nil || m.Content != "done" {
+		t.Fatalf("fallback failed: %v %+v", err, m)
+	}
+	if calls != 2 {
+		t.Fatalf("want 2 calls, got %d", calls)
+	}
+	if _, err := os.Stat(filepath.Join(configDir(), "data", "last_bad_request.json")); err != nil {
+		t.Fatal("bad request not saved")
+	}
+	// Next call goes straight to text mode.
+	if _, err := c.Chat(msgs, nil); err != nil || calls != 3 {
+		t.Fatalf("second call: %v calls=%d", err, calls)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -151,6 +152,9 @@ type Client struct {
 	// x-goog-api-key retry) work even when the base URL is a test
 	// server or a custom endpoint that does not reveal the provider.
 	HTTP *http.Client
+	// flattenTools: this provider rejected native tool history once,
+	// so tool steps are sent as plain text from then on.
+	flattenTools bool
 }
 
 func NewClient(baseURL, apiKey, model string) *Client {
@@ -200,9 +204,13 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	// tool_call_id", Gemini: INVALID_ARGUMENT). Repair ids in place,
 	// and send a cleaned copy where tool calls and results pair up.
 	fillToolCallIDs(messages)
+	sent := sanitizeToolHistory(messages)
+	if isGeminiBase(c.BaseURL, c.Provider) {
+		nameToolResults(sent)
+	}
 	reqBody := chatRequest{
 		Model:       c.Model,
-		Messages:    sanitizeToolHistory(messages),
+		Messages:    sent,
 		Tools:       tools,
 		Temperature: 0.7,
 		MaxTokens:   4096,
@@ -212,6 +220,9 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 		reqBody.MaxTokens = 8192
 	}
 
+	if c.flattenTools && hasToolSteps(sent) {
+		reqBody.Messages = flattenToolHistory(sent)
+	}
 	data, err := json.Marshal(reqBody)
 	if err != nil {
 		return Message{}, err
@@ -253,6 +264,25 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 		(c.Provider == "gemini" || strings.Contains(strings.ToLower(c.BaseURL), "generativelanguage.googleapis.com")) {
 		if retryBody, retryStatus, rerr := doChat(true); rerr == nil && retryStatus < 400 {
 			body, statusCode = retryBody, retryStatus
+		}
+	}
+	// v0.8: a 400 on a history with tool calls is almost always the
+	// provider rejecting how the tool steps are encoded (ids, names,
+	// signatures — each provider has its own rules, and history may
+	// come from another model). Save the request for debugging, then
+	// retry once with the tool steps written out as plain text, which
+	// every provider accepts. The model can still call tools again.
+	if statusCode == 400 && !c.flattenTools && hasToolSteps(sent) {
+		saveBadRequest(reqBody, body)
+		reqBody.Messages = flattenToolHistory(sent)
+		if d, merr := json.Marshal(reqBody); merr == nil {
+			data = d
+			if rb, rs, rerr := doChat(false); rerr == nil {
+				body, statusCode = rb, rs
+				if rs < 400 {
+					c.flattenTools = true // keep doing this for this provider
+				}
+			}
 		}
 	}
 	var out chatResponse
@@ -388,4 +418,85 @@ func sanitizeToolHistory(messages []Message) []Message {
 	}
 	closeOpen()
 	return out
+}
+
+// hasToolSteps reports whether a history carries tool calls or results.
+func hasToolSteps(msgs []Message) bool {
+	for _, m := range msgs {
+		if m.Role == "tool" || len(m.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// nameToolResults sets each tool result's name to the function it
+// answers (Gemini's OpenAI layer maps results back to calls by name).
+func nameToolResults(msgs []Message) {
+	names := map[string]string{}
+	for i := range msgs {
+		for _, tc := range msgs[i].ToolCalls {
+			names[tc.ID] = tc.Function.Name
+		}
+		if msgs[i].Role == "tool" && msgs[i].Name == "" {
+			msgs[i].Name = names[msgs[i].ToolCallID]
+		}
+		if msgs[i].Role == "tool" && msgs[i].Content == "" {
+			msgs[i].Content = "(no output)"
+		}
+	}
+}
+
+// flattenToolHistory writes tool calls and results as plain text:
+// an assistant message says which tools it called, and each result
+// becomes a user message. No tool_calls / tool roles remain.
+func flattenToolHistory(msgs []Message) []Message {
+	out := make([]Message, 0, len(msgs))
+	names := map[string]string{}
+	for _, m := range msgs {
+		switch {
+		case m.Role == "assistant" && len(m.ToolCalls) > 0:
+			var b strings.Builder
+			b.WriteString(strings.TrimSpace(m.Content))
+			for _, tc := range m.ToolCalls {
+				names[tc.ID] = tc.Function.Name
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				fmt.Fprintf(&b, "[I called the tool %s with %s]", tc.Function.Name, truncate(tc.Function.Arguments, 4000))
+			}
+			out = append(out, Message{Role: "assistant", Content: b.String()})
+		case m.Role == "tool":
+			n := names[m.ToolCallID]
+			if n == "" {
+				n = "tool"
+			}
+			c := m.Content
+			if c == "" {
+				c = "(no output)"
+			}
+			out = append(out, Message{Role: "user", Content: "[result of " + n + "]\n" + c})
+		default:
+			m.ToolCalls, m.ToolCallID, m.Name = nil, "", ""
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// saveBadRequest keeps the last rejected request (no API key — that
+// is only in the headers) in ~/.muse99/data/last_bad_request.json so a
+// provider error can be diagnosed. Long texts are cut short.
+func saveBadRequest(req chatRequest, resp []byte) {
+	cp := make([]Message, len(req.Messages))
+	copy(cp, req.Messages)
+	for i := range cp {
+		cp[i].Content = truncate(cp[i].Content, 1500)
+	}
+	dump := map[string]any{"model": req.Model, "messages": cp, "tool_count": len(req.Tools), "response": string(resp[:min(2000, len(resp))])}
+	if b, err := json.MarshalIndent(dump, "", "  "); err == nil {
+		dir := filepath.Join(configDir(), "data")
+		_ = os.MkdirAll(dir, 0o700)
+		_ = os.WriteFile(filepath.Join(dir, "last_bad_request.json"), b, 0o600)
+	}
 }
