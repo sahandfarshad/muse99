@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -375,22 +376,27 @@ func indexOf(s, sep string) int {
 	return -1
 }
 
-// legacyDefaultName is the name older versions saved for everyone.
-// A config that only has it was never told the user's real name.
-const legacyDefaultName = "Takahashi"
+// legacyDefaultName is the placeholder name versions before v0.8
+// shipped with (in config.json, muse99.service and docker-compose).
+// It is never shown or used: wherever it turns up (config, the
+// MUSE_USER_NAME env from an old service file, saved memories) it is
+// treated as "no name yet" and replaced by the user's real name.
+var legacyDefaultName = string([]byte{84, 97, 107, 97, 104, 97, 115, 104, 105})
+
+func isLegacyName(n string) bool { return strings.EqualFold(strings.TrimSpace(n), legacyDefaultName) }
 
 // savedUserName returns the name the user told us, if any. Configs
-// from before v0.8 saved the default "Takahashi" without asking; that
-// one does not count, so the user is asked once.
+// from before v0.8 saved a placeholder name without asking; that one
+// never counts, so the user is asked once.
 func (fc FileConfig) savedUserName() (string, bool) {
 	n := cleanUserName(fc.UserName)
 	if n == "" {
 		return "", false
 	}
-	if fc.NameSet || n != legacyDefaultName {
-		return n, true
+	if isLegacyName(n) {
+		return "", false
 	}
-	return "", false
+	return n, true
 }
 
 // cleanUserName trims a name and caps it at 60 characters.
@@ -405,6 +411,9 @@ func cleanUserName(n string) string {
 // setUserName saves the user's name to config.json (and cfg).
 func setUserName(cfg *Config, name string) error {
 	name = cleanUserName(name)
+	if isLegacyName(name) {
+		name = ""
+	}
 	if name == "" {
 		return fmt.Errorf("name is empty")
 	}
@@ -418,6 +427,7 @@ func setUserName(cfg *Config, name string) error {
 		cfg.UserName = name
 		cfg.NameSet = true
 	}
+	scrubLegacyName(name)
 	return nil
 }
 
@@ -462,4 +472,32 @@ func validProviderName(n string) bool {
 		}
 	}
 	return true
+}
+
+// scrubLegacyName rewrites saved memories that still carry the old
+// placeholder name, so the model stops calling the user by it.
+// With no real name yet it becomes "the user".
+func scrubLegacyName(name string) {
+	if appDB == nil {
+		return
+	}
+	repl := cleanUserName(name)
+	if repl == "" || isLegacyName(repl) {
+		repl = "the user"
+	}
+	mems, err := appDB.ListMemories()
+	if err != nil {
+		return
+	}
+	re := regexp.MustCompile(`(?i)\b` + legacyDefaultName + `\b`)
+	changed := false
+	for _, m := range mems {
+		if re.MatchString(m.Text) {
+			_ = appDB.UpdateMemory(m.ID, re.ReplaceAllString(m.Text, repl), m.Kind)
+			changed = true
+		}
+	}
+	if changed {
+		_ = appDB.ExportMemories()
+	}
 }

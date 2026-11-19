@@ -49,7 +49,7 @@ function getEl(id) {
 const settingsJSON = {
   base_url: 'https://api.meta.ai/v1',
   model: 'muse-spark-1.3',
-  user_name: 'Takahashi',
+  user_name: 'Sahand',
   api_key_masked: '••••••••9999',
   api_key_source: 'saved',
   config_path: '/home/test/.muse99/config.json',
@@ -63,7 +63,7 @@ const settingsJSON = {
   models: [], models_source: 'cached', models_fetched_at: '',
 };
 const statusJSON = {
-  model: 'muse-spark-1.3', mode: 'Muse Spark — Muse mode', user: 'Takahashi',
+  model: 'muse-spark-1.3', mode: 'Muse Spark — Muse mode', user: 'Sahand',
   workdir: '/tmp', shell: false, base_url: 'https://api.meta.ai/v1',
   tasks: 0, chats: 1, servers: 0, goals: 0, provider: 'spark',
   address: 'http://127.0.0.1:3759', port: 3759, domain: '', tls: false,

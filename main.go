@@ -106,11 +106,14 @@ func loadConfig() Config {
 	applyFileConfig(&cfg, fc)
 	// A name given on the command line or in MUSE_USER_NAME wins.
 	if explicit["user"] || strings.TrimSpace(os.Getenv("MUSE_USER_NAME")) != "" {
-		if n := cleanUserName(envOr("MUSE_USER_NAME", "")); n != "" && !explicit["user"] {
+		if n := cleanUserName(envOr("MUSE_USER_NAME", "")); n != "" && !isLegacyName(n) && !explicit["user"] {
 			cfg.UserName = n
 		}
 		if explicit["user"] {
 			cfg.UserName = cleanUserName(cfg.UserName)
+		}
+		if isLegacyName(cfg.UserName) {
+			cfg.UserName = ""
 		}
 		cfg.NameSet = cfg.UserName != ""
 	}
@@ -203,6 +206,7 @@ func main() {
 		fmt.Println("Note: database could not be opened, using files only:", err)
 	} else {
 		defer db.Close()
+		scrubLegacyName(cfg.UserName)
 	}
 	// v5: the API key is set inside the web UI (Settings → Provider &
 	// model), not on the command line. So the menu / web UI may start

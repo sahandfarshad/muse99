@@ -9,7 +9,7 @@ services:
       MODEL_API_KEY: ${MODEL_API_KEY:?set MODEL_API_KEY in .env}
       MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-https://api.meta.ai/v1}
       MODEL_ID: ${MODEL_ID:-muse-spark-1.3}
-      MUSE_USER_NAME: ${MUSE_USER_NAME:-Takahashi}
+      MUSE_USER_NAME: ${MUSE_USER_NAME:-}
       # Web UI login (required — the UI stays locked without it)
       MUSE99_WEB_USER: ${MUSE99_WEB_USER:?set MUSE99_WEB_USER in .env}
       MUSE99_WEB_PASSWORD: ${MUSE99_WEB_PASSWORD:?set MUSE99_WEB_PASSWORD in .env}

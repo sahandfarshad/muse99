@@ -36,11 +36,11 @@ func TestUsagePerModel(t *testing.T) {
 }
 
 func TestSavedUserNameLegacy(t *testing.T) {
-	if _, ok := (FileConfig{UserName: "Takahashi"}).savedUserName(); ok {
+	if _, ok := (FileConfig{UserName: legacyDefaultName}).savedUserName(); ok {
 		t.Fatal("legacy default name must not count as set")
 	}
-	if n, ok := (FileConfig{UserName: "Takahashi", NameSet: true}).savedUserName(); !ok || n != "Takahashi" {
-		t.Fatal("a confirmed Takahashi is a real name")
+	if _, ok := (FileConfig{UserName: legacyDefaultName, NameSet: true}).savedUserName(); ok {
+		t.Fatal("the old placeholder never counts as a name")
 	}
 	if n, ok := (FileConfig{UserName: "  Sahand  "}).savedUserName(); !ok || n != "Sahand" {
 		t.Fatalf("custom name from an older version should count: %q %v", n, ok)

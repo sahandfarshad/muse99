@@ -9,7 +9,6 @@ User=%i
 WorkingDirectory=%h/muse99
 Environment=MODEL_API_BASE_URL=https://api.meta.ai/v1
 Environment=MODEL_ID=muse-spark-1.3
-Environment=MUSE_USER_NAME=Takahashi
 # Web UI on :3759, SSH menu is not used in service mode — use --menu=false --web
 ExecStart=%h/.local/bin/muse99 --menu=false --web --port 3759
 Restart=on-failure

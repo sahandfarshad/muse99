@@ -60,3 +60,23 @@ func TestRedactActivity(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+func TestScrubLegacyName(t *testing.T) {
+	d, err := OpenDB(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	old := appDB
+	appDB = d
+	defer func() { appDB = old }()
+	_, _, _ = d.AddMemory(legacyDefaultName+" prefers Go", "preference", "")
+	scrubLegacyName("Sahand")
+	mems, _ := d.ListMemories()
+	if len(mems) != 1 || mems[0].Text != "Sahand prefers Go" {
+		t.Fatalf("got %+v", mems)
+	}
+	if !isLegacyName(strings.ToLower(legacyDefaultName)) {
+		t.Fatal("case")
+	}
+}
