@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -263,11 +266,45 @@ func (r *toolRunner) run(name, argsJSON string) string {
 	}
 }
 
+// shellTimeout is how long one shell command may run before it is
+// killed. Default 120s; override with MUSE99_SHELL_TIMEOUT (seconds,
+// 5..3600). A stuck command (a server that never exits, an interactive
+// prompt, an endless loop) no longer hangs the agent forever.
+func shellTimeout() time.Duration {
+	d := 120 * time.Second
+	if v := strings.TrimSpace(os.Getenv("MUSE99_SHELL_TIMEOUT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 5 && n <= 3600 {
+			d = time.Duration(n) * time.Second
+		}
+	}
+	return d
+}
+
 func (r *toolRunner) shell(command, dir string) string {
-	cmd := exec.Command("bash", "-c", command)
+	return runShellWithTimeout(command, dir, shellTimeout())
+}
+
+func runShellWithTimeout(command, dir string, timeout time.Duration) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = dir
+	cmd.Stdin = nil
+	// Own process group, so a timeout kills the whole tree (bash and
+	// everything it started), not just bash.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 3 * time.Second
 	out, err := cmd.CombinedOutput()
 	s := truncate(string(out), 10000)
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Sprintf("error: command timed out after %s and was killed. For a server or long job, run it in the background (nohup ... &) and check its log.\n%s", timeout, s)
+	}
 	if err != nil {
 		return fmt.Sprintf("exit error: %v\n%s", err, s)
 	}
