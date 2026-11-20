@@ -56,6 +56,10 @@ type Chat struct {
 	// messages 1..SummaryUpTo (they stay stored and on screen).
 	Summary     string `json:"summary,omitempty"`
 	SummaryUpTo int    `json:"summary_up_to,omitempty"`
+	// v0.9.13: tokens this chat used since it began (or was cleared),
+	// and what its latest message used.
+	Tokens     usageDelta  `json:"tokens"`
+	LastTokens *usageDelta `json:"last_tokens,omitempty"`
 }
 
 type StoredMessage struct {
@@ -350,6 +354,7 @@ func (d *DB) ClearChat(id string) error {
 		ch.MsgCount = 0
 		ch.LastSummaryMsg = 0
 		ch.Summary, ch.SummaryUpTo = "", 0
+		ch.Tokens, ch.LastTokens = usageDelta{}, nil
 		ch.UpdatedAt = time.Now()
 		data, _ := json.Marshal(ch)
 		return cb.Put([]byte(id), data)
@@ -902,4 +907,32 @@ func memoryContextFor(query, memoryPath string) string {
 		// DB is open but has no memories yet: fall through to the file.
 	}
 	return loadMemory(memoryPath)
+}
+
+// AddChatUsage adds one message's tokens to the chat's running total
+// and keeps them as the chat's latest message usage.
+func (d *DB) AddChatUsage(id string, u usageDelta) (Chat, error) {
+	var out Chat
+	err := d.bolt.Update(func(tx *bbolt.Tx) error {
+		cb := tx.Bucket(bucketChats)
+		v := cb.Get([]byte(id))
+		if v == nil {
+			return fmt.Errorf("chat not found: %s", id)
+		}
+		var ch Chat
+		if err := json.Unmarshal(v, &ch); err != nil {
+			return err
+		}
+		ch.Tokens.PromptTokens += u.PromptTokens
+		ch.Tokens.CompletionTokens += u.CompletionTokens
+		ch.Tokens.TotalTokens += u.TotalTokens
+		ch.Tokens.Calls += u.Calls
+		ch.Tokens.CachedTokens += u.CachedTokens
+		last := u
+		ch.LastTokens = &last
+		out = ch
+		data, _ := json.Marshal(ch)
+		return cb.Put([]byte(id), data)
+	})
+	return out, err
 }

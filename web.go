@@ -49,6 +49,8 @@ type chatResp struct {
 	ChatID string   `json:"chat_id,omitempty"`
 	// v0.8: tokens this reply used and the model that answered.
 	Usage *usageDelta `json:"usage,omitempty"`
+	// v0.9.13: this chat's tokens since it began.
+	ChatTokens *usageDelta `json:"chat_tokens,omitempty"`
 }
 
 // webController owns one HTTP server so the SSH menu can start, stop
@@ -743,6 +745,7 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	setActivityChat(s.currentChatID)
 	defer setActivityChat("")
 	ctl.begin()
+	usageBefore := loadUsage()
 	if s.db != nil && s.currentChatID != "" {
 		probe := append(append([]Message{}, s.messages...), Message{Role: "user", Content: req.Message})
 		if maybeCompactChat(s.client, s.db, s.currentChatID, probe) {
@@ -751,7 +754,6 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	before := len(s.messages)
 	memCtx := refreshSystemFor(&s.cfg, &s.messages, req.Message)
-	usageBefore := loadUsage()
 	reply, tools := runTurnWithContext(s.client, s.fallbackClient(), s.runner, s.tools, &s.messages, req.Message, memCtx)
 	var turnUsage *usageDelta
 	if d := diffUsage(usageBefore, loadUsage()); d.Calls > 0 {
@@ -761,6 +763,12 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		turnUsage = &d
 	}
 	persistTurn(s.currentChatID, before, s.messages)
+	var chatTokens *usageDelta
+	if s.db != nil && s.currentChatID != "" && turnUsage != nil {
+		if ch, err := s.db.AddChatUsage(s.currentChatID, *turnUsage); err == nil {
+			chatTokens = &ch.Tokens
+		}
+	}
 	if s.db != nil && s.currentChatID != "" {
 		chatID := s.currentChatID
 		go func() {
@@ -770,7 +778,7 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(chatResp{Reply: reply, Tools: tools, ChatID: s.currentChatID, Usage: turnUsage})
+	_ = json.NewEncoder(w).Encode(chatResp{Reply: reply, Tools: tools, ChatID: s.currentChatID, Usage: turnUsage, ChatTokens: chatTokens})
 }
 
 // noAPIKeyNotice is what chat returns (and the UI shows) when no
@@ -1262,7 +1270,7 @@ main{max-width:1180px;margin:0 auto;padding:10px 40px 200px}
 .utable th{color:var(--muted);font-weight:560}
 .utable td.n{text-align:right;font-variant-numeric:tabular-nums}
 .tools{display:inline-block;font-size:12px;color:var(--muted);margin-top:8px;background:var(--line2);padding:3px 10px;border-radius:999px;white-space:normal}
-.runctl{display:none;justify-content:center;gap:10px;margin:0 auto 10px}.runctl.show{display:flex}.runctl .btn{padding:6px 16px;border-radius:999px}.composer .runctl button{width:auto;height:auto;font-size:13.5px;font-weight:560;background:var(--surface);color:var(--ink);border:1px solid var(--line);padding:7px 18px;border-radius:999px;box-shadow:var(--shadow)}.composer .runctl button::after{content:none}.runctl .btn.stop{color:var(--bad);border-color:var(--bad)}
+.chatuse{font-size:12px;color:var(--ink2);white-space:nowrap}.chatuse:empty{display:none}.runctl{display:none;justify-content:center;gap:10px;margin:0 auto 10px}.runctl.show{display:flex}.runctl .btn{padding:6px 16px;border-radius:999px}.composer .runctl button{width:auto;height:auto;font-size:13.5px;font-weight:560;background:var(--surface);color:var(--ink);border:1px solid var(--line);padding:7px 18px;border-radius:999px;box-shadow:var(--shadow)}.composer .runctl button::after{content:none}.runctl .btn.stop{color:var(--bad);border-color:var(--bad)}
 #thinking{display:none;align-items:center;gap:10px;margin:14px 0 14px 38px;padding:12px 16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);font-size:13.5px;color:var(--ink2);width:fit-content}
 #thinking::before{content:"";width:12px;height:12px;border-radius:50%;border:2px solid var(--glow);border-top-color:var(--ink);animation:spin .8s linear infinite;display:inline-block;margin-right:8px;vertical-align:-1px}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -1358,7 +1366,7 @@ h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
 <div class="me"><span class="av">✦</span><span id="me-name">Muse99</span><a href="/logout">Log out</a></div>
 </aside>
 <div class="page">
-<header><div class="topbar"><span id="pagetitle">Chat</span><span class="pill spark" id="mode">…</span><span class="spacer"></span><button class="iconbtn optbtn" id="optbtn" onclick="toggleOpts()" title="Show model, backup, pace, summary and other options">⚙ Options</button><div class="opts" id="opts"><select class="pill model" id="model" onchange="pickModel(this.value)" title="Model for this chat. Switch any time: the chat and its steps stay, the next message goes to the new model."></select><select class="pill" id="backup" onchange="pickBackup(this.value)" title="Backup model: used automatically when the main model still fails after retries."></select><select class="pill" id="pace" onchange="pickPace(this.value)" title="Wait this long between model calls. Use 3-10 s for free models with a per-minute limit (e.g. OpenRouter :free)."><option value="0">Pace: off</option><option value="1">Pace: 1s</option><option value="2">Pace: 2s</option><option value="3">Pace: 3s</option><option value="5">Pace: 5s</option><option value="10">Pace: 10s</option><option value="15">Pace: 15s</option><option value="20">Pace: 20s</option><option value="30">Pace: 30s</option><option value="60">Pace: 60s</option></select><select class="pill" id="compact" onchange="pickCompact(this.value)" title="When the chat gets this long, Muse99 summarises the older part and sends only the summary plus the latest messages. Saves tokens on long tasks. The whole chat stays on screen."><option value="0">Summary: off</option><option value="20000">Summary at 20k</option><option value="40000">Summary at 40k</option><option value="80000">Summary at 80k</option><option value="150000">Summary at 150k</option></select><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust.">Shell <input type="checkbox" id="shell-toggle" onchange="toggleShell()"></label></div><button class="iconbtn" id="actbtn" onclick="toggleActivity()" title="See what Muse99 is doing step by step">◧ Behind the scenes</button><button class="iconbtn" onclick="clearChat()">Clear</button></div></header>
+<header><div class="topbar"><span id="pagetitle">Chat</span><span class="pill chatuse" id="chatuse" title="Tokens this chat used since it began, and what the last message used"></span><span class="pill spark" id="mode">…</span><span class="spacer"></span><button class="iconbtn optbtn" id="optbtn" onclick="toggleOpts()" title="Show model, backup, pace, summary and other options">⚙ Options</button><div class="opts" id="opts"><select class="pill model" id="model" onchange="pickModel(this.value)" title="Model for this chat. Switch any time: the chat and its steps stay, the next message goes to the new model."></select><select class="pill" id="backup" onchange="pickBackup(this.value)" title="Backup model: used automatically when the main model still fails after retries."></select><select class="pill" id="pace" onchange="pickPace(this.value)" title="Wait this long between model calls. Use 3-10 s for free models with a per-minute limit (e.g. OpenRouter :free)."><option value="0">Pace: off</option><option value="1">Pace: 1s</option><option value="2">Pace: 2s</option><option value="3">Pace: 3s</option><option value="5">Pace: 5s</option><option value="10">Pace: 10s</option><option value="15">Pace: 15s</option><option value="20">Pace: 20s</option><option value="30">Pace: 30s</option><option value="60">Pace: 60s</option></select><select class="pill" id="compact" onchange="pickCompact(this.value)" title="When the chat gets this long, Muse99 summarises the older part and sends only the summary plus the latest messages. Saves tokens on long tasks. The whole chat stays on screen."><option value="0">Summary: off</option><option value="20000">Summary at 20k</option><option value="40000">Summary at 40k</option><option value="80000">Summary at 80k</option><option value="150000">Summary at 150k</option></select><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust.">Shell <input type="checkbox" id="shell-toggle" onchange="toggleShell()"></label></div><button class="iconbtn" id="actbtn" onclick="toggleActivity()" title="See what Muse99 is doing step by step">◧ Behind the scenes</button><button class="iconbtn" onclick="clearChat()">Clear</button></div></header>
 <div id="taskbar" class="taskbar" style="display:none" onclick="showTasksTab()"></div>
 <main>
 <div id="pane-chat" class="pane active"><div id="nokey" class="card" style="display:none;margin-top:18px"><h3>Add an API key to start</h3><p class="sub">Muse99 needs a provider key before it can chat. It takes a minute, right here — no terminal.</p><button class="btn primary" onclick="showSettingsTab()">Open Settings</button></div><div id="chat"></div><div id="thinking">Muse99 is working…</div></div>
@@ -1447,8 +1455,8 @@ function renderActivity(){const evs=[...actEvents.values()].filter(e=>!currentCh
 try{if(localStorage.getItem('muse99_act')==='1'){setTimeout(toggleActivity,0);}}catch(e){}
 async function loadChats(){const q=document.getElementById('chat-search').value.trim();const r=await fetch('/api/chats'+(q?'?q='+encodeURIComponent(q):''));const j=await r.json();const list=document.getElementById('chatlist');list.innerHTML=(j||[]).map(c=>'<div class="chatitem'+(c.id===currentChatId?' active':'')+'" onclick="openChat(\''+c.id+'\')"><span>'+escapeHtml(c.title||'Chat')+'</span><button title="Rename" onclick="event.stopPropagation();renameChat(\''+c.id+'\',\''+escapeHtml(c.title||'').replace(/'/g,'')+'\')">✎</button><button title="Delete" onclick="event.stopPropagation();deleteChat(\''+c.id+'\')">✕</button></div>').join('')||'<div class="empty">(no chats yet)</div>';}
 function escapeHtml(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-async function openChat(id){currentChatId=id;loadChatActivity(id);const r=await fetch('/api/chats/'+id+'/messages');const j=await r.json();chat.innerHTML='';(j||[]).forEach(m=>{if(m.role==='user')add(m.content,'user');else if(m.role==='assistant'&&(m.content||'').trim())add(m.content,'muse');});loadChats();}
-async function newChat(){const r=await fetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'New chat'})});const j=await r.json();currentChatId=j.id;loadChatActivity(j.id);chat.innerHTML='';add("New chat — what should we do?","muse");loadChats();}
+async function openChat(id){currentChatId=id;loadChatActivity(id);refreshChatUse();const r=await fetch('/api/chats/'+id+'/messages');const j=await r.json();chat.innerHTML='';(j||[]).forEach(m=>{if(m.role==='user')add(m.content,'user');else if(m.role==='assistant'&&(m.content||'').trim())add(m.content,'muse');});loadChats();}
+async function newChat(){const r=await fetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'New chat'})});const j=await r.json();currentChatId=j.id;loadChatActivity(j.id);showChatUse(null,null);chat.innerHTML='';add("New chat — what should we do?","muse");loadChats();}
 async function renameChat(id,title){const t=prompt('Rename chat',title);if(!t)return;await fetch('/api/chats/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t})});loadChats();}
 async function deleteChat(id){if(!confirm('Delete this chat and all its messages?'))return;await fetch('/api/chats/'+id,{method:'DELETE'});if(currentChatId===id){currentChatId=null;chat.innerHTML='';}loadChats();}
 async function loadMemories(){const r=await fetch('/api/memories');const j=await r.json();document.getElementById('memlist').innerHTML=(j||[]).map(m=>'<div class="card"><b>['+escapeHtml(m.kind||'fact')+']</b> '+escapeHtml(m.text)+' <span class="muted">'+(m.created_at||'').slice(0,10)+'</span> <button class="btn ghost" onclick="deleteMemory(\''+m.id+'\')">Delete</button></div>').join('')||'<div class="empty">(no memories saved yet)</div>';}
@@ -1464,8 +1472,10 @@ let runPaused=false;function runCtl(on){const c=document.getElementById('runctl'
 async function ctlSend(a){try{return await (await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})})).json();}catch(e){toast('Could not reach server: '+e,'err');return null;}}
 async function ctlPause(){const j=await ctlSend(runPaused?'play':'pause');if(!j)return;runPaused=!!j.paused;document.getElementById('pausebtn').textContent=runPaused?'▶ Play':'⏸ Pause';think.textContent=runPaused?'Paused after this step — press Play to go on':'Muse99 is working…';toast(runPaused?'Pausing after the current step':'Going on');}
 async function ctlStop(){const j=await ctlSend('stop');if(j){think.textContent='Stopping…';toast('Stopped');}}
-document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;if(document.getElementById('runctl').classList.contains('show')){toast('Muse99 is still on the last message. Press Stop first, or wait.');return;}add(v,'user');inp.value='';think.textContent='Muse99 is working…';think.style.display='block';actBusy=true;runCtl(true);pollActivity();try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';actBusy=false;runCtl(false);pollActivity();add(j.reply||j.error||'(no reply)','muse',j.tools,j.usage);loadStatus();}catch(err){think.style.display='none';actBusy=false;runCtl(false);add('Could not reach server: '+err,'muse');}});
-async function clearChat(){await fetch('/api/clear',{method:'POST'});chat.innerHTML='';add('Chat cleared. Memory is kept.','muse');}
+document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;if(document.getElementById('runctl').classList.contains('show')){toast('Muse99 is still on the last message. Press Stop first, or wait.');return;}add(v,'user');inp.value='';think.textContent='Muse99 is working…';think.style.display='block';actBusy=true;runCtl(true);pollActivity();try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;if(j.chat_tokens)showChatUse(j.chat_tokens,j.usage);think.style.display='none';actBusy=false;runCtl(false);pollActivity();add(j.reply||j.error||'(no reply)','muse',j.tools,j.usage);loadStatus();}catch(err){think.style.display='none';actBusy=false;runCtl(false);add('Could not reach server: '+err,'muse');}});
+function showChatUse(t,l){const e=document.getElementById('chatuse');if(!e)return;if(!t||!t.total_tokens){e.textContent='';return;}e.textContent='This chat: '+t.total_tokens.toLocaleString()+' tokens'+(l&&l.total_tokens?' · Last: '+l.total_tokens.toLocaleString():'');}
+async function refreshChatUse(){if(!currentChatId){showChatUse(null,null);return;}try{const c=await (await fetch('/api/chats/'+currentChatId)).json();if(c&&c.id===currentChatId)showChatUse(c.tokens,c.last_tokens);}catch(e){}}
+async function clearChat(){await fetch('/api/clear',{method:'POST'});showChatUse(null,null);chat.innerHTML='';add('Chat cleared. Memory is kept.','muse');}
 async function loadFiles(p){const r=await fetch('/api/files?path='+encodeURIComponent(p||''));const j=await r.json();document.getElementById('filelist').innerHTML=j.files.map(f=>'<div class="card" style="cursor:pointer;padding:12px 16px" onclick="viewFile(\''+f.path.replace(/'/g,'')+'\','+f.dir+')">'+(f.dir?'📁 ':'📄 ')+f.name+'</div>').join('')||'<div class="empty">(empty)</div>';}
 async function viewFile(p,isDir){if(isDir){loadFiles(p);return;}const r=await fetch('/api/file?path='+encodeURIComponent(p));const j=await r.json();document.getElementById('fileview').textContent=j.content||'(empty)';}
 async function loadTasks(){const r=await fetch('/api/task');const j=await r.json();document.getElementById('tasklist').innerHTML=j.map(t=>'<div class="card"><b>'+escapeHtml(t.goal)+'</b><br>Status: <b>'+escapeHtml(t.status)+'</b> · '+escapeHtml(t.id)+(t.steps&&t.steps.length?'<br>Steps: '+escapeHtml(t.steps.slice(-8).join(' → ')):'')+'<br>'+escapeHtml(t.summary||'')+'</div>').join('')||'<div class="empty">(no tasks yet)</div>';}
