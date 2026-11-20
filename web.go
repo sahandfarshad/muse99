@@ -742,6 +742,7 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	setActivityChat(s.currentChatID)
 	defer setActivityChat("")
+	ctl.begin()
 	if s.db != nil && s.currentChatID != "" {
 		probe := append(append([]Message{}, s.messages...), Message{Role: "user", Content: req.Message})
 		if maybeCompactChat(s.client, s.db, s.currentChatID, probe) {
@@ -791,6 +792,7 @@ func (s *webServer) handleTask(w http.ResponseWriter, r *http.Request) {
 		// The task runs in the background; create it here so the id
 		// can be returned to the browser, which shows live progress.
 		task := addTask(body.Goal)
+		ctl.begin()
 		go func() {
 			_ = runAutonomous(s.client, s.runner, s.tools, s.system, body.Goal, s.cfg.Workdir, task.ID)
 		}()
@@ -1153,6 +1155,7 @@ func buildMux(s *webServer) *http.ServeMux {
 	mux.HandleFunc("/api/models/fallback", s.handleModelFallback)
 	mux.HandleFunc("/api/pace", s.handlePace)
 	mux.HandleFunc("/api/compact", s.handleCompact)
+	mux.HandleFunc("/api/control", s.handleControl)
 	mux.HandleFunc("/api/db", s.handleDB)
 	mux.HandleFunc("/api/servers/key", s.handleServerKey)
 	mux.HandleFunc("/api/servers/test", s.handleServerAction)
@@ -1259,6 +1262,7 @@ main{max-width:1180px;margin:0 auto;padding:10px 40px 200px}
 .utable th{color:var(--muted);font-weight:560}
 .utable td.n{text-align:right;font-variant-numeric:tabular-nums}
 .tools{display:inline-block;font-size:12px;color:var(--muted);margin-top:8px;background:var(--line2);padding:3px 10px;border-radius:999px;white-space:normal}
+.runctl{display:none;justify-content:center;gap:10px;margin:0 auto 10px}.runctl.show{display:flex}.runctl .btn{padding:6px 16px;border-radius:999px}.runctl .btn.stop{color:var(--bad);border-color:var(--bad)}
 #thinking{display:none;align-items:center;gap:10px;margin:14px 0 14px 38px;padding:12px 16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);font-size:13.5px;color:var(--ink2);width:fit-content}
 #thinking::before{content:"";width:12px;height:12px;border-radius:50%;border:2px solid var(--glow);border-top-color:var(--ink);animation:spin .8s linear infinite;display:inline-block;margin-right:8px;vertical-align:-1px}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -1388,7 +1392,7 @@ h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
 <div class="card" id="usagebox"><h3>Usage</h3><p class="sub">Tokens per model. Cost is a rough estimate at Spark rates.</p><div id="usage-detail">Loading…</div><div class="kv" id="settings" style="margin-top:10px"></div></div>
 </div>
 </main>
-<form id="f" class="composer"><div class="row"><input id="in" autocomplete="off" placeholder="Give Muse99 a task…"><button aria-label="Send">Send</button></div><div class="hint">Muse99 can run commands on this server while Shell is on.</div></form>
+<form id="f" class="composer"><div class="runctl" id="runctl"><button type="button" class="btn" id="pausebtn" onclick="ctlPause()" title="Finish the step it is on, then wait">⏸ Pause</button><button type="button" class="btn stop" onclick="ctlStop()" title="Cancel the model call and any running command now">⏹ Stop</button></div><div class="row"><input id="in" autocomplete="off" placeholder="Give Muse99 a task…"><button aria-label="Send">Send</button></div><div class="hint">Muse99 can run commands on this server while Shell is on.</div></form>
 </div>
 <script>
 if(window.fetch){const _fetch=window.fetch.bind(window);window.fetch=async(...a)=>{const r=await _fetch(...a);if(r.status===401){location.href='/login';}return r;};}
@@ -1456,7 +1460,11 @@ async function pickModel(v){if(v==='more'){showSettingsTab();loadStatus();return
 async function pickBackup(v){const m=(window._models||[])[+v];const body=m?{provider:m.provider,model:m.model}:{provider:'',model:''};try{const r=await fetch('/api/models/fallback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();toast(j.ok?(m?'Backup model: '+m.model:'Backup model off'):'Could not save: '+(j.error||'error'),j.ok?'':'err');}catch(e){toast('Could not save: '+e,'err');}document.getElementById('backup').blur();loadStatus();}
 async function loadStatus(){const r=await fetch('/api/status');const s=await r.json();document.getElementById('mode').textContent=s.mode;fillModels(s);{const pc=document.getElementById('pace');if(pc&&document.activeElement!==pc&&typeof s.pace==='number')pc.value=String(s.pace);}{const cp=document.getElementById('compact');if(cp&&document.activeElement!==cp&&typeof s.compact==='number'){const v=String(s.compact);if(![...cp.options].some(o=>o.value===v)){const o=document.createElement('option');o.value=v;o.textContent='Summary at '+Math.round(s.compact/1000)+'k';cp.appendChild(o);}cp.value=v;}}{const mn=document.getElementById('me-name');if(mn&&s.user)mn.textContent=s.user;const av=document.querySelector?document.querySelector('.me .av'):null;if(av&&s.user)av.textContent=s.user.trim().charAt(0).toUpperCase();}if(s.address)document.getElementById('addr').textContent=s.address;document.getElementById('usage').textContent=fmtUsage(s.usage);{const v=document.getElementById('ver');if(v)v.textContent=s.version||'';}if(s.name_needed){const nb=document.getElementById('namebox');if(nb.style.display==='none'){nb.style.display='flex';setTimeout(()=>document.getElementById('name-in').focus(),50);}}else{welcome(s.user);}const nk=document.getElementById('nokey');if(nk){nk.style.display=s.api_key_set?'none':'block';}const t=document.getElementById('shell-toggle');if(t){t.checked=!!s.shell;document.getElementById('shellbox').classList.toggle('on',!!s.shell);}}
 loadChats();
-document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;add(v,'user');inp.value='';think.textContent='Muse99 is working…';think.style.display='block';actBusy=true;pollActivity();try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';actBusy=false;pollActivity();add(j.reply||j.error||'(no reply)','muse',j.tools,j.usage);loadStatus();}catch(err){think.style.display='none';actBusy=false;add('Could not reach server: '+err,'muse');}});
+let runPaused=false;function runCtl(on){const c=document.getElementById('runctl');if(c)c.classList.toggle('show',!!on);if(!on){runPaused=false;const b=document.getElementById('pausebtn');if(b)b.textContent='⏸ Pause';}}
+async function ctlSend(a){try{return await (await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})})).json();}catch(e){toast('Could not reach server: '+e,'err');return null;}}
+async function ctlPause(){const j=await ctlSend(runPaused?'play':'pause');if(!j)return;runPaused=!!j.paused;document.getElementById('pausebtn').textContent=runPaused?'▶ Play':'⏸ Pause';think.textContent=runPaused?'Paused after this step — press Play to go on':'Muse99 is working…';toast(runPaused?'Pausing after the current step':'Going on');}
+async function ctlStop(){const j=await ctlSend('stop');if(j){think.textContent='Stopping…';toast('Stopped');}}
+document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const v=inp.value.trim();if(!v)return;add(v,'user');inp.value='';think.textContent='Muse99 is working…';think.style.display='block';actBusy=true;runCtl(true);pollActivity();try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:v,chat_id:currentChatId})});const j=await r.json();if(j.chat_id)currentChatId=j.chat_id;think.style.display='none';actBusy=false;runCtl(false);pollActivity();add(j.reply||j.error||'(no reply)','muse',j.tools,j.usage);loadStatus();}catch(err){think.style.display='none';actBusy=false;runCtl(false);add('Could not reach server: '+err,'muse');}});
 async function clearChat(){await fetch('/api/clear',{method:'POST'});chat.innerHTML='';add('Chat cleared. Memory is kept.','muse');}
 async function loadFiles(p){const r=await fetch('/api/files?path='+encodeURIComponent(p||''));const j=await r.json();document.getElementById('filelist').innerHTML=j.files.map(f=>'<div class="card" style="cursor:pointer;padding:12px 16px" onclick="viewFile(\''+f.path.replace(/'/g,'')+'\','+f.dir+')">'+(f.dir?'📁 ':'📄 ')+f.name+'</div>').join('')||'<div class="empty">(empty)</div>';}
 async function viewFile(p,isDir){if(isDir){loadFiles(p);return;}const r=await fetch('/api/file?path='+encodeURIComponent(p));const j=await r.json();document.getElementById('fileview').textContent=j.content||'(empty)';}

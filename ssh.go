@@ -151,7 +151,7 @@ func runRemote(srv Server, command string, timeout time.Duration) (string, error
 	}
 	addr := net.JoinHostPort(srv.Host, strconv.Itoa(port))
 	conf := &ssh.ClientConfig{User: srv.User, Auth: auths, HostKeyCallback: hk, Timeout: 15 * time.Second}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctl.context(), timeout)
 	defer cancel()
 	type res struct {
 		out string
@@ -199,6 +199,9 @@ func runRemote(srv Server, command string, timeout time.Duration) (string, error
 			client.Close()
 		}
 		cmu.Unlock()
+		if ctx.Err() == context.Canceled {
+			return "", fmt.Errorf("stopped by the user (Stop button); the SSH connection was closed")
+		}
 		return "", fmt.Errorf("timed out after %s", timeout)
 	}
 }

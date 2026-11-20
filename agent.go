@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -78,8 +79,17 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 
 	for step := 0; step < maxAutonomousSteps; step++ {
 		src := "task " + task.ID
+		if ctl.checkpoint(src) != nil {
+			updateTask(task.ID, "failed", "Stopped by you (Stop button)", steps)
+			return finish("Task stopped by you.")
+		}
 		aid := activity.add(src, "model", fmt.Sprintf("Waiting for %s (task step %d)…", client.Model, step+1), "", true)
 		msg, err := client.Chat(messages, tools)
+		if errors.Is(err, errStopped) {
+			activity.finish(aid, false, "Model call cancelled", "")
+			updateTask(task.ID, "failed", "Stopped by you (Stop button)", steps)
+			return finish("Task stopped by you.")
+		}
 		if err != nil {
 			activity.finish(aid, false, "Model call failed", err.Error())
 			updateTask(task.ID, "failed", "API error: "+err.Error(), steps)
@@ -123,7 +133,7 @@ func runAutonomous(client *Client, runner *toolRunner, tools []ToolDef, system, 
 			messages = append(messages, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
 		}
 		// Small pause so a runaway loop is visible and rate limits are respected.
-		time.Sleep(200 * time.Millisecond)
+		_ = sleepCtx(200 * time.Millisecond)
 	}
 
 	updateTask(task.ID, "failed", "Hit step limit (100) without DONE. Last: "+lastReply, steps)

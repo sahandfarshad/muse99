@@ -275,7 +275,7 @@ func (r *toolRunner) shell(command, dir string) string {
 }
 
 func runShellWithTimeout(command, dir string, timeout time.Duration) string {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctl.context(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = dir
@@ -292,6 +292,9 @@ func runShellWithTimeout(command, dir string, timeout time.Duration) string {
 	cmd.WaitDelay = 3 * time.Second
 	out, err := cmd.CombinedOutput()
 	s := truncate(string(out), 10000)
+	if ctx.Err() == context.Canceled {
+		return "error: stopped by the user (Stop button); the command was killed.\n" + s
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Sprintf("error: command timed out after %s and was killed. For a server or long job, run it in the background (nohup ... &) and check its log.\n%s", timeout, s)
 	}

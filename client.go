@@ -253,7 +253,7 @@ func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) 
 	// doChat sends the request once. useGoogKey sends the key as
 	// x-goog-api-key instead of Bearer (see below).
 	doChat := func(useGoogKey bool) ([]byte, int, error) {
-		req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+		req, err := http.NewRequestWithContext(ctl.context(), "POST", url, bytes.NewReader(data))
 		if err != nil {
 			return nil, 0, err
 		}
@@ -641,9 +641,17 @@ var retryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.S
 // A real error (bad key, bad request) returns at once.
 func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	for attempt := 0; ; attempt++ {
-		paceWait()
+		if err := paceWait(); err != nil {
+			return Message{}, err
+		}
+		if ctl.context().Err() != nil {
+			return Message{}, errStopped
+		}
 		msg, err := c.chatOnce(messages, tools)
 		paceDone()
+		if err != nil && ctl.context().Err() != nil {
+			return Message{}, errStopped
+		}
 		if err == nil || c.NoRetry || !isTransientError(err) || attempt >= len(retryDelays) {
 			if err != nil && attempt > 0 {
 				err = fmt.Errorf("%w (gave up after %d retries)", err, attempt)
@@ -652,7 +660,10 @@ func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 		}
 		d := retryDelays[attempt]
 		id := activity.add("", "retry", fmt.Sprintf("Connection or provider problem — waiting %s, then retry %d of %d…", d, attempt+1, len(retryDelays)), err.Error(), true)
-		time.Sleep(d)
+		if sleepCtx(d) != nil {
+			activity.finish(id, false, "Stopped while waiting to retry", "")
+			return Message{}, errStopped
+		}
 		activity.finish(id, true, fmt.Sprintf("Waited %s, retrying (%d of %d)", d, attempt+1, len(retryDelays)), "")
 	}
 }

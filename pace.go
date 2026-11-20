@@ -32,20 +32,24 @@ func callPace() time.Duration {
 }
 
 // paceWait sleeps until the pause since the last call has passed.
-func paceWait() {
+func paceWait() error {
 	d := callPace()
 	if d <= 0 {
-		return
+		return nil
 	}
 	paceMu.Lock()
 	wait := time.Until(lastCallEnd.Add(d))
 	paceMu.Unlock()
 	if wait <= 0 {
-		return
+		return nil
 	}
 	id := activity.add("", "retry", fmt.Sprintf("Pacing: waiting %s before the next model call", wait.Round(100*time.Millisecond)), "Set in the Pace menu at the top of the chat.", true)
-	time.Sleep(wait)
+	if sleepCtx(wait) != nil {
+		activity.finish(id, false, "Stopped", "")
+		return errStopped
+	}
 	activity.finish(id, true, "Paced "+wait.Round(100*time.Millisecond).String(), "")
+	return nil
 }
 
 func paceDone() {

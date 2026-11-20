@@ -10,6 +10,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -361,9 +362,20 @@ func runTurnFallback(client, fallback *Client, runner *toolRunner, tools []ToolD
 	var used []string
 	activity.add("chat", "user", "New message", input, false)
 
+	stopped := func() (string, []string) {
+		activity.add("chat", "error", "Stopped by you", "", false)
+		return fmt.Sprintf("⏹ Stopped by you after %d tool steps. What was done so far is saved in this chat; send \"continue\" to go on.", len(used)), used
+	}
 	for step := 0; step < 20; step++ {
+		if ctl.checkpoint("chat") != nil {
+			return stopped()
+		}
 		aid := activity.add("chat", "model", fmt.Sprintf("Waiting for %s (step %d, %d messages)…", client.Model, step+1, len(*messages)), "", true)
 		msg, err := client.Chat(*messages, tools)
+		if errors.Is(err, errStopped) {
+			activity.finish(aid, false, "Model call cancelled", "")
+			return stopped()
+		}
 		if err != nil {
 			activity.finish(aid, false, "Model call failed", err.Error())
 			if fallback != nil && switchedFrom == "" {
@@ -393,7 +405,14 @@ func runTurnFallback(client, fallback *Client, runner *toolRunner, tools []ToolD
 			return msg.Content, used
 		}
 
-		for _, tc := range msg.ToolCalls {
+		for i, tc := range msg.ToolCalls {
+			if i > 0 && ctl.checkpoint("chat") != nil {
+				// keep every tool call answered, or the next request 400s
+				for _, rest := range msg.ToolCalls[i:] {
+					*messages = append(*messages, Message{Role: "tool", Content: "not run: stopped by the user", ToolCallID: rest.ID})
+				}
+				return stopped()
+			}
 			used = append(used, tc.Function.Name)
 			fmt.Printf("  [tool] %s %s\n", tc.Function.Name, truncate(tc.Function.Arguments, 200))
 			tid := activity.add("chat", "tool", "Running "+tc.Function.Name+"…", prettyToolArgs(tc.Function.Arguments), true)
