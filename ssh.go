@@ -176,10 +176,13 @@ func runRemote(srv Server, command string, timeout time.Duration) (string, error
 			return
 		}
 		defer sess.Close()
-		var buf bytes.Buffer
+		var buf, ebuf bytes.Buffer
 		sess.Stdout = &buf
-		sess.Stderr = &buf
+		sess.Stderr = &ebuf
 		err = sess.Run(command)
+		if ebuf.Len() > 0 {
+			buf.WriteString(ebuf.String())
+		}
 		var ee *ssh.ExitError
 		if errors.As(err, &ee) {
 			ch <- res{buf.String() + fmt.Sprintf("\n(exit code %d)", ee.ExitStatus()), nil}

@@ -59,6 +59,7 @@ func startTestSSH(t *testing.T, password string, allowKey func(ssh.PublicKey) bo
 								cmd := string(req.Payload[4 : 4+n])
 								_ = req.Reply(true, nil)
 								_, _ = ch.Write([]byte("ran: " + cmd))
+								_ = ch.CloseWrite()
 								_, _ = ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 								ch.Close()
 								return
