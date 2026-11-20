@@ -41,6 +41,8 @@ type UsageTotals struct {
 	// v0.8: which model the last call used, and totals per model
 	// (key = model id as sent to the provider).
 	LastModel string                 `json:"last_model,omitempty"`
+	// v0.9.10: input tokens the provider served from its cache.
+	CachedTokens int `json:"cached_tokens,omitempty"`
 	ByModel   map[string]*ModelUsage `json:"by_model,omitempty"`
 }
 
@@ -52,6 +54,7 @@ type ModelUsage struct {
 	CompletionTokens int       `json:"completion_tokens"`
 	TotalTokens      int       `json:"total_tokens"`
 	Calls            int       `json:"calls"`
+	CachedTokens     int       `json:"cached_tokens,omitempty"`
 	LastUsed         time.Time `json:"last_used"`
 }
 
@@ -189,6 +192,7 @@ type usageDelta struct {
 	CompletionTokens int    `json:"completion_tokens"`
 	TotalTokens      int    `json:"total_tokens"`
 	Calls            int    `json:"calls"`
+	CachedTokens     int    `json:"cached_tokens,omitempty"`
 	Model            string `json:"model,omitempty"`
 }
 
@@ -198,6 +202,7 @@ func diffUsage(before, after UsageTotals) usageDelta {
 		CompletionTokens: after.CompletionTokens - before.CompletionTokens,
 		TotalTokens:      after.TotalTokens - before.TotalTokens,
 		Calls:            after.Calls - before.Calls,
+		CachedTokens:     after.CachedTokens - before.CachedTokens,
 	}
 	models := []string{}
 	for name, m := range after.ByModel {
@@ -240,4 +245,22 @@ func formatInt(n int) string {
 		out += string(c)
 	}
 	return out
+}
+
+// recordCached adds input tokens a provider reported as cached.
+func recordCached(model string, n int) {
+	if n <= 0 {
+		return
+	}
+	usageMu.Lock()
+	defer usageMu.Unlock()
+	u := loadUsage()
+	u.CachedTokens += n
+	if m := u.ByModel[model]; m != nil {
+		m.CachedTokens += n
+	}
+	_ = saveJSON("usage.json", u)
+	if appDB != nil {
+		_ = appDB.saveUsageDB(u)
+	}
 }

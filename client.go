@@ -112,6 +112,12 @@ type Message struct {
 	// Reasoning is the model's visible thinking (reasoning_content /
 	// reasoning), shown in the activity panel only; never sent back.
 	Reasoning string `json:"-"`
+	// Context (v0.9.10) is extra text sent with this message only to
+	// the model (the memories picked for it), never stored or shown.
+	// It sits on the user message instead of in the system prompt, so
+	// the start of every request stays the same and providers can
+	// cache it.
+	Context string `json:"-"`
 }
 
 type ToolDef struct {
@@ -137,9 +143,14 @@ type chatResponse struct {
 		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details,omitempty"`
+		PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"` // DeepSeek
+		CachedTokens         int `json:"cached_tokens"`
 	} `json:"usage,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
@@ -219,7 +230,7 @@ func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) 
 	// tool_call_id", Gemini: INVALID_ARGUMENT). Repair ids in place,
 	// and send a cleaned copy where tool calls and results pair up.
 	fillToolCallIDs(messages)
-	sent := clipOldToolResults(sanitizeToolHistory(messages))
+	sent := clipOldToolResults(sanitizeToolHistory(withContext(messages)))
 	if isGeminiBase(c.BaseURL, c.Provider) {
 		nameToolResults(sent)
 	}
@@ -359,6 +370,14 @@ func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) 
 	// models omit it — then nothing is recorded for that call).
 	if out.Usage != nil {
 		recordUsageFor(c.Provider, c.Model, out.Usage.PromptTokens, out.Usage.CompletionTokens)
+		cached := out.Usage.CachedTokens
+		if out.Usage.PromptTokensDetails != nil && out.Usage.PromptTokensDetails.CachedTokens > cached {
+			cached = out.Usage.PromptTokensDetails.CachedTokens
+		}
+		if out.Usage.PromptCacheHitTokens > cached {
+			cached = out.Usage.PromptCacheHitTokens
+		}
+		recordCached(c.Model, cached)
 	}
 	msg := out.Choices[0].Message
 	var rs struct {

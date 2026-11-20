@@ -1011,8 +1011,8 @@ func runREPL(cfg *Config, client *Client, runner *toolRunner, tools []ToolDef, m
 			continue
 		}
 		before := len(*messages)
-		refreshSystemFor(cfg, messages, input)
-		reply := runTurn(client, runner, tools, messages, input)
+		memCtx := refreshSystemFor(cfg, messages, input)
+		reply, _ := runTurnWithContext(client, nil, runner, tools, messages, input, memCtx)
 		persistTurn(chatID, before, *messages)
 		if n := maybeAutoSummarise(client, appDB, chatID); n > 0 {
 			fmt.Printf("(saved %d new fact(s) to memory)\n", n)

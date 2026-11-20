@@ -333,13 +333,68 @@ func persistTurn(chatID string, beforeLen int, after []Message) {
 // refreshSystemFor injects the memories relevant to this user message
 // into the system prompt, so each turn sees the right memories
 // instead of only the ones from startup.
-func refreshSystemFor(cfg *Config, messages *[]Message, input string) {
+//
+// v0.9.10: the system prompt no longer carries the memories, so it is
+// the same on every request and providers can cache the start of the
+// conversation. The memories picked for this message are returned and
+// go with the user message (Message.Context); lines this chat was
+// already given are left out.
+func refreshSystemFor(cfg *Config, messages *[]Message, input string) string {
 	if len(*messages) == 0 || (*messages)[0].Role != "system" {
-		return
+		return ""
 	}
 	syncUserName(cfg)
-	ctx := memoryContextFor(input, cfg.MemoryPath)
-	(*messages)[0].Content = systemPrompt(cfg.UserName, ctx, cfg.BaseURL, cfg.Model)
+	if sp := systemPrompt(cfg.UserName, "", cfg.BaseURL, cfg.Model); (*messages)[0].Content != sp {
+		(*messages)[0].Content = sp
+	}
+	return newMemoryLines(memoryContextFor(input, cfg.MemoryPath), *messages)
+}
+
+// newMemoryLines keeps the memory lines not already sent in this chat.
+func newMemoryLines(ctx string, messages []Message) string {
+	if strings.TrimSpace(ctx) == "" {
+		return ""
+	}
+	seen := map[string]bool{}
+	for _, m := range messages {
+		for _, l := range strings.Split(m.Context, "\n") {
+			seen[strings.TrimSpace(l)] = true
+		}
+	}
+	var keep []string
+	for _, l := range strings.Split(ctx, "\n") {
+		t := strings.TrimSpace(l)
+		if t == "" || seen[t] || strings.HasSuffix(t, "about the user:") {
+			continue
+		}
+		seen[t] = true
+		keep = append(keep, l)
+	}
+	return strings.Join(keep, "\n")
+}
+
+// withContext returns messages with each Context put in front of its
+// content (a copy; the history is not changed).
+func withContext(messages []Message) []Message {
+	has := false
+	for _, m := range messages {
+		if m.Context != "" {
+			has = true
+			break
+		}
+	}
+	if !has {
+		return messages
+	}
+	out := make([]Message, len(messages))
+	copy(out, messages)
+	for i, m := range out {
+		if m.Context != "" {
+			out[i].Content = "[What you remember about the user that may matter here:\n" + m.Context + "\n]\n\n" + m.Content
+			out[i].Context = ""
+		}
+	}
+	return out
 }
 
 // runTurn sends one user message and loops through tool calls
@@ -357,8 +412,14 @@ func runTurnDetailed(client *Client, runner *toolRunner, tools []ToolDef, messag
 // main model still fails after its retries, the same step is sent to
 // the backup and the rest of the turn stays on it.
 func runTurnFallback(client, fallback *Client, runner *toolRunner, tools []ToolDef, messages *[]Message, input string) (string, []string) {
+	return runTurnWithContext(client, fallback, runner, tools, messages, input, "")
+}
+
+// runTurnWithContext is runTurnFallback with memories (memCtx) sent
+// along with the user message.
+func runTurnWithContext(client, fallback *Client, runner *toolRunner, tools []ToolDef, messages *[]Message, input, memCtx string) (string, []string) {
 	switchedFrom := ""
-	*messages = append(*messages, Message{Role: "user", Content: input})
+	*messages = append(*messages, Message{Role: "user", Content: input, Context: memCtx})
 	var used []string
 	activity.add("chat", "user", "New message", input, false)
 

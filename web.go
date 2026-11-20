@@ -750,9 +750,9 @@ func (s *webServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	before := len(s.messages)
-	refreshSystemFor(&s.cfg, &s.messages, req.Message)
+	memCtx := refreshSystemFor(&s.cfg, &s.messages, req.Message)
 	usageBefore := loadUsage()
-	reply, tools := runTurnFallback(s.client, s.fallbackClient(), s.runner, s.tools, &s.messages, req.Message)
+	reply, tools := runTurnWithContext(s.client, s.fallbackClient(), s.runner, s.tools, &s.messages, req.Message, memCtx)
 	var turnUsage *usageDelta
 	if d := diffUsage(usageBefore, loadUsage()); d.Calls > 0 {
 		if d.Model == "" {
@@ -1419,7 +1419,7 @@ let welcomed=false;
 function welcome(name){if(welcomed||(chat.children&&chat.children.length))return;welcomed=true;add((name?'Hey '+name+', ':'Hey, ')+"I'm Muse99 in your browser. Give me a task and I'll work it till the end — files, shell, tests, and verification.","muse");}
 async function saveFirstName(){const n=document.getElementById('name-in').value.trim();if(!n){document.getElementById('name-in').focus();return;}await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_name:n})});document.getElementById('namebox').style.display='none';await loadStatus();}
 document.getElementById('name-in').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();saveFirstName();}});
-function fmtTok(u){if(!u||!u.calls)return '';return u.total_tokens.toLocaleString()+' tokens ('+u.prompt_tokens.toLocaleString()+' in / '+u.completion_tokens.toLocaleString()+' out)'+(u.model?' · '+u.model:'');}
+function fmtTok(u){if(!u||!u.calls)return '';return u.total_tokens.toLocaleString()+' tokens ('+u.prompt_tokens.toLocaleString()+' in / '+u.completion_tokens.toLocaleString()+' out'+(u.cached_tokens?', '+u.cached_tokens.toLocaleString()+' from cache':'')+')'+(u.model?' · '+u.model:'');}
 function fmtUsage(u){if(!u||!u.calls)return 'No tokens used yet';return u.total_tokens.toLocaleString()+' tokens'+(u.last_model?' · '+u.last_model:'');}
 function usageTable(u){const rows=(u&&u.by_model)||[];if(!rows.length)return '';return '<table class="utable"><tr><th>Model</th><th>Provider</th><th class="n">In</th><th class="n">Out</th><th class="n">Total</th><th class="n">Calls</th></tr>'+rows.map(m=>'<tr><td>'+escapeHtml(m.model)+'</td><td>'+escapeHtml(m.provider||'')+'</td><td class="n">'+m.prompt_tokens.toLocaleString()+'</td><td class="n">'+m.completion_tokens.toLocaleString()+'</td><td class="n">'+m.total_tokens.toLocaleString()+'</td><td class="n">'+m.calls.toLocaleString()+'</td></tr>').join('')+'</table>';}
 loadStatus();
