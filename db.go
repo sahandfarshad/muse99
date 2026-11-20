@@ -52,6 +52,10 @@ type Chat struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 	MsgCount       int       `json:"msg_count"`
 	LastSummaryMsg int       `json:"last_summary_msg"`
+	// v0.9.8: summary of the older part sent to the model instead of
+	// messages 1..SummaryUpTo (they stay stored and on screen).
+	Summary     string `json:"summary,omitempty"`
+	SummaryUpTo int    `json:"summary_up_to,omitempty"`
 }
 
 type StoredMessage struct {
@@ -345,6 +349,7 @@ func (d *DB) ClearChat(id string) error {
 		}
 		ch.MsgCount = 0
 		ch.LastSummaryMsg = 0
+		ch.Summary, ch.SummaryUpTo = "", 0
 		ch.UpdatedAt = time.Now()
 		data, _ := json.Marshal(ch)
 		return cb.Put([]byte(id), data)

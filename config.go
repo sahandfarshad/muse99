@@ -56,6 +56,9 @@ type FileConfig struct {
 	Fallback     *ModelRef  `json:"fallback,omitempty"`
 	// v0.9.5: seconds to wait between model calls (0 = off).
 	CallDelaySec int `json:"call_delay_sec,omitempty"`
+	// v0.9.8: summarise the chat when it passes this many tokens
+	// (0 = default 40000, -1 = off).
+	CompactTokens int `json:"compact_tokens,omitempty"`
 }
 
 // Provider presets. All are OpenAI-compatible /chat/completions endpoints,
