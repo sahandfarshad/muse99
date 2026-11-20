@@ -85,15 +85,27 @@ else
   URL="https://github.com/${REPO}/releases/download/${TAG}/muse99-linux-${GO_ARCH}"
   echo "Release: $TAG"
 fi
-echo "Downloading: $URL"
+echo "==> Downloading: $URL"
 
 TMP="$(mktemp -d)"
+
+# download_binary: fetch $URL into $TMP/muse99. On a terminal it shows
+# curl's progress bar (percent done), so a slow server never looks
+# stuck; in logs or CI it stays quiet. Goes to stderr, so it still
+# shows when the script runs as `curl … | bash`.
+download_binary() {
+  if [ -t 2 ] && [ -z "${MUSE99_QUIET:-}" ]; then
+    curl -fL --progress-bar --connect-timeout 20 --retry 3 -o "$TMP/muse99" "$URL"
+  else
+    curl -fsSL --connect-timeout 20 --retry 3 -o "$TMP/muse99" "$URL"
+  fi
+}
 trap 'rm -rf "$TMP"' EXIT
 
 if [ -n "${LOCAL_BINARY:-}" ]; then
   echo "Using local binary: $LOCAL_BINARY"
   cp "$LOCAL_BINARY" "$TMP/muse99" || { echo "ERROR: could not copy $LOCAL_BINARY" >&2; exit 1; }
-elif ! curl -fsSL -o "$TMP/muse99" "$URL"; then
+elif ! download_binary; then
   echo "" >&2
   echo "ERROR: could not download Muse99 from:" >&2
   echo "  $URL" >&2
@@ -109,6 +121,9 @@ elif ! curl -fsSL -o "$TMP/muse99" "$URL"; then
 fi
 
 chmod +x "$TMP/muse99"
+SIZE="$(du -h "$TMP/muse99" 2>/dev/null | cut -f1)"
+echo "==> Downloaded ${SIZE:-ok}"
+echo "==> Checking the binary runs…"
 
 # --- Verify the binary actually runs before installing it ---
 if ! "$TMP/muse99" --help >/dev/null 2>&1; then
@@ -116,6 +131,7 @@ if ! "$TMP/muse99" --help >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "==> Installing to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 install -m 755 "$TMP/muse99" "$INSTALL_DIR/muse99"
 
@@ -184,6 +200,7 @@ wait_port_up() {
 }
 
 if [ -z "${MUSE99_NO_WEB:-}" ]; then
+  echo "==> Starting the web UI on port $PORT…"
   RESTARTED=0
   WEB_FAILED=0
   if port_answers; then
