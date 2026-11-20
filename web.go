@@ -1218,7 +1218,8 @@ select.pill{appearance:auto;cursor:pointer;font:inherit;font-size:12.5px;color:v
 .iconbtn{background:none;border:1px solid transparent;color:var(--ink2);border-radius:999px;padding:6px 12px;cursor:pointer;font-size:12.5px;font-family:var(--font)}
 .iconbtn:hover{border-color:var(--line);color:var(--ink)}
 /* content */
-main{max-width:760px;margin:0 auto;padding:10px 28px 200px}
+main{max-width:1180px;margin:0 auto;padding:10px 40px 200px}
+.opts{display:contents}.optbtn{display:none}
 .pane{display:none;animation:fade .2s ease}
 .pane.active{display:block}
 @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
@@ -1226,8 +1227,8 @@ main{max-width:760px;margin:0 auto;padding:10px 28px 200px}
 .msg .ln{unicode-bidi:plaintext;text-align:start;min-height:1em}
 .msg .tools,.msg .tok{direction:ltr;unicode-bidi:isolate}
 .msg{line-height:1.65;white-space:pre-wrap;margin:14px 0;font-size:15px;overflow-wrap:anywhere}
-.msg.user{align-self:flex-end;max-width:78%;background:var(--ink);color:var(--bg);padding:11px 16px;border-radius:20px 20px 6px 20px}
-.msg.muse{position:relative;padding-left:38px;max-width:100%}
+.msg.user{align-self:flex-end;max-width:min(78%,760px);background:var(--ink);color:var(--bg);padding:11px 16px;border-radius:20px 20px 6px 20px}
+.msg.muse{position:relative;padding-left:38px;max-width:min(100%,860px);align-self:flex-start}
 .msg.muse::before{content:"";position:absolute;left:0;top:1px;width:24px;height:24px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#fff 0,#f1e6d6 35%,#c9b49a 100%);box-shadow:inset 0 0 0 1px rgba(0,0,0,.06),0 2px 8px rgba(150,120,80,.25)}
 .ver{font-size:11px;font-weight:500;color:var(--muted);margin-left:6px;letter-spacing:.02em}
 .tok{display:block;font-size:11.5px;color:var(--muted);margin-top:6px}
@@ -1244,7 +1245,7 @@ main{max-width:760px;margin:0 auto;padding:10px 28px 200px}
 code,pre{font-family:var(--mono)}
 /* composer */
 .composer{position:fixed;left:var(--side);right:0;bottom:0;padding:24px 28px 22px;background:linear-gradient(180deg,transparent,var(--bg) 42%);z-index:10;margin:0}
-.composer .row{max-width:704px;margin:0 auto;display:flex;align-items:flex-end;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:10px 10px 10px 18px;box-shadow:0 2px 4px rgba(40,30,20,.04),0 16px 40px rgba(40,30,20,.10);transition:border-color .2s}
+.composer .row{max-width:1100px;margin:0 auto;display:flex;align-items:flex-end;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:10px 10px 10px 18px;box-shadow:0 2px 4px rgba(40,30,20,.04),0 16px 40px rgba(40,30,20,.10);transition:border-color .2s}
 .composer .row:focus-within{border-color:var(--ink2)}
 .composer input{flex:1;border:0;background:none;padding:10px 0;font-size:15px;outline:none;box-shadow:none!important}
 .composer button{width:38px;height:38px;flex:none;border-radius:50%;border:0;background:var(--ink);color:var(--bg);font-size:0;cursor:pointer;position:relative}
@@ -1319,8 +1320,8 @@ h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
 .aev.bad{border-color:var(--bad)}.aev.bad .at span.t{color:var(--bad)}
 .aev.retry .at span.t{color:var(--warn)}
 .aev .src{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
-@media (min-width:1200px){body.actopen main,body.actopen .composer{margin-right:400px}body.actopen .composer{right:400px}}
-@media (max-width:860px){:root{--side:0px}aside{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 14px}#chatlist{max-height:150px}.tabs{flex-direction:row;overflow-x:auto;border-top:0;padding-top:4px}.tabs button{white-space:nowrap}.me{display:none}.topbar{padding:10px 14px}.pill.addr,.pill.spark{display:none}main{padding:8px 16px 190px}.composer{left:0;padding:20px 14px 14px}.msg.user{max-width:90%}}
+@media (min-width:1200px){body.actopen main{margin-right:400px;margin-left:0}body.actopen .composer{right:400px}}
+@media (max-width:860px){:root{--side:0px}aside{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 14px}#chatlist{max-height:150px}.tabs{flex-direction:row;overflow-x:auto;border-top:0;padding-top:4px}.tabs button{white-space:nowrap}.me{display:none}.topbar{padding:10px 14px}.pill.addr,.pill.spark{display:none}main{padding:8px 16px 190px}.composer{left:0;padding:20px 14px 14px}.msg.user{max-width:90%}.msg.muse{max-width:100%}.optbtn{display:inline-block;border-color:var(--line)}.opts{display:none;width:100%;flex-wrap:wrap;gap:8px}.opts.show{display:flex}.opts select.pill{max-width:100%;flex:1 1 140px}#pagetitle{margin-right:0}}
 </style></head><body><div id="toast"></div><div id="actpanel"><div class="ahead"><b>Behind the scenes</b><button class="iconbtn" onclick="clearActivity()" title="Clear the list">Clear</button><button class="iconbtn" onclick="toggleActivity()" title="Close">✕</button></div><div id="actnow">Idle.</div><div id="actlist"><div class="empty">Nothing yet. Send a message and every step shows up here: waiting for the model, its thinking, tool runs and their output.</div></div></div>
 <div id="namebox" class="modal" style="display:none"><div class="card"><h3>What should I call you?</h3><p class="sub">I'll use this name from now on. You can change it any time in Settings.</p><input id="name-in" placeholder="Your name" autocomplete="given-name" maxlength="60"><div class="savebar" style="margin-top:12px"><button class="btn primary" onclick="saveFirstName()">Continue</button></div></div></div>
 <aside id="sidebar">
@@ -1333,7 +1334,7 @@ h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
 <div class="me"><span class="av">✦</span><span id="me-name">Muse99</span><a href="/logout">Log out</a></div>
 </aside>
 <div class="page">
-<header><div class="topbar"><span id="pagetitle">Chat</span><span class="pill spark" id="mode">…</span><span class="spacer"></span><select class="pill model" id="model" onchange="pickModel(this.value)" title="Model for this chat. Switch any time: the chat and its steps stay, the next message goes to the new model."></select><select class="pill" id="backup" onchange="pickBackup(this.value)" title="Backup model: used automatically when the main model still fails after retries."></select><select class="pill" id="pace" onchange="pickPace(this.value)" title="Wait this long between model calls. Use 3-10 s for free models with a per-minute limit (e.g. OpenRouter :free)."><option value="0">Pace: off</option><option value="1">Pace: 1s</option><option value="2">Pace: 2s</option><option value="3">Pace: 3s</option><option value="5">Pace: 5s</option><option value="10">Pace: 10s</option><option value="15">Pace: 15s</option><option value="20">Pace: 20s</option><option value="30">Pace: 30s</option><option value="60">Pace: 60s</option></select><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust.">Shell <input type="checkbox" id="shell-toggle" onchange="toggleShell()"></label><button class="iconbtn" id="actbtn" onclick="toggleActivity()" title="See what Muse99 is doing step by step">◧ Behind the scenes</button><button class="iconbtn" onclick="clearChat()">Clear</button></div></header>
+<header><div class="topbar"><span id="pagetitle">Chat</span><span class="pill spark" id="mode">…</span><span class="spacer"></span><button class="iconbtn optbtn" id="optbtn" onclick="toggleOpts()" title="Show model, backup, pace and other options">⚙ Options</button><div class="opts" id="opts"><select class="pill model" id="model" onchange="pickModel(this.value)" title="Model for this chat. Switch any time: the chat and its steps stay, the next message goes to the new model."></select><select class="pill" id="backup" onchange="pickBackup(this.value)" title="Backup model: used automatically when the main model still fails after retries."></select><select class="pill" id="pace" onchange="pickPace(this.value)" title="Wait this long between model calls. Use 3-10 s for free models with a per-minute limit (e.g. OpenRouter :free)."><option value="0">Pace: off</option><option value="1">Pace: 1s</option><option value="2">Pace: 2s</option><option value="3">Pace: 3s</option><option value="5">Pace: 5s</option><option value="10">Pace: 10s</option><option value="15">Pace: 15s</option><option value="20">Pace: 20s</option><option value="30">Pace: 30s</option><option value="60">Pace: 60s</option></select><span class="pill addr" id="addr"></span><span class="pill" id="usage"></span><label class="shellbox" id="shellbox" title="Lets Muse99 run commands on this server. Only turn on in a folder you trust.">Shell <input type="checkbox" id="shell-toggle" onchange="toggleShell()"></label></div><button class="iconbtn" id="actbtn" onclick="toggleActivity()" title="See what Muse99 is doing step by step">◧ Behind the scenes</button><button class="iconbtn" onclick="clearChat()">Clear</button></div></header>
 <div id="taskbar" class="taskbar" style="display:none" onclick="showTasksTab()"></div>
 <main>
 <div id="pane-chat" class="pane active"><div id="nokey" class="card" style="display:none;margin-top:18px"><h3>Add an API key to start</h3><p class="sub">Muse99 needs a provider key before it can chat. It takes a minute, right here — no terminal.</p><button class="btn primary" onclick="showSettingsTab()">Open Settings</button></div><div id="chat"></div><div id="thinking">Muse99 is working…</div></div>
@@ -1377,6 +1378,7 @@ document.getElementById('addr').textContent=window.location.href;
 function showSettingsTab(){document.querySelectorAll('.tabs button')[5].click();}
 function showTasksTab(){document.querySelectorAll('.tabs button')[2].click();}
 let tasksTimer=null;
+function toggleOpts(){const o=document.getElementById('opts');o.classList.toggle('show');document.getElementById('optbtn').textContent=o.classList.contains('show')?'✕ Options':'⚙ Options';}
 function tab(name,btn){document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));document.getElementById('pane-'+name).classList.add('active');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');{const pt=document.getElementById('pagetitle');if(pt)pt.textContent=btn.textContent.replace(/^[^A-Za-z]+/,'');const fm=document.getElementById('f');if(fm&&fm.classList)fm.classList.toggle('hide',name!=='chat');}if(name==='files')loadFiles('');if(name==='tasks'){loadTasks();if(!tasksTimer)tasksTimer=setInterval(loadTasks,3000);}else if(tasksTimer){clearInterval(tasksTimer);tasksTimer=null;}if(name==='memory'){loadMemory();loadMemories();}if(name==='servers')loadServers();if(name==='db')loadDB();if(name==='settings')loadSettings();}
 // refreshTaskBar is the background-activity indicator: while a task
 // runs (or one just failed) it shows what is happening on every
