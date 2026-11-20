@@ -59,6 +59,8 @@ type FileConfig struct {
 	// v0.9.8: summarise the chat when it passes this many tokens
 	// (0 = default 40000, -1 = off).
 	CompactTokens int `json:"compact_tokens,omitempty"`
+	// v0.9.15: which earlier thinking is sent back: "" (= turn), all, off.
+	ThinkingKeep string `json:"thinking_keep,omitempty"`
 }
 
 // Provider presets. All are OpenAI-compatible /chat/completions endpoints,

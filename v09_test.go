@@ -49,9 +49,8 @@ func TestBudgetRetryAndActivity(t *testing.T) {
 	if !found {
 		t.Fatal("no retry event")
 	}
-	b, _ := json.Marshal(msg)
-	if strings.Contains(string(b), "thinking") {
-		t.Fatal("reasoning must not be sent back")
+	if msg.ReasoningContent != "thinking" {
+		t.Fatal("reasoning_content should be kept on the message (v0.9.15)")
 	}
 }
 

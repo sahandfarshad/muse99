@@ -110,8 +110,13 @@ type Message struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`
 	// Reasoning is the model's visible thinking (reasoning_content /
-	// reasoning), shown in the activity panel only; never sent back.
+	// reasoning), shown in the activity panel.
 	Reasoning string `json:"-"`
+	// ReasoningContent (v0.9.15) is the same thinking, stored with the
+	// chat and sent back as reasoning_content so models with
+	// interleaved thinking (GLM, DeepSeek, Kimi) keep their thread
+	// between tool steps. Which turns carry it: thinkingKeep().
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 	// Context (v0.9.10) is extra text sent with this message only to
 	// the model (the memories picked for it), never stored or shown.
 	// It sits on the user message instead of in the system prompt, so
@@ -181,6 +186,9 @@ type Client struct {
 	// noMaxTokens: the provider only accepted the request without a
 	// max token field at all.
 	noMaxTokens bool
+	// noReasoning (v0.9.15): this provider rejected reasoning_content
+	// in the history, so it is never sent to it again.
+	noReasoning bool
 }
 
 func NewClient(baseURL, apiKey, model string) *Client {
@@ -230,7 +238,7 @@ func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) 
 	// tool_call_id", Gemini: INVALID_ARGUMENT). Repair ids in place,
 	// and send a cleaned copy where tool calls and results pair up.
 	fillToolCallIDs(messages)
-	sent := clipOldToolResults(sanitizeToolHistory(withContext(messages)))
+	sent := clipOldToolResults(sanitizeToolHistory(keepThinking(withContext(messages), c.noReasoning)))
 	if isGeminiBase(c.BaseURL, c.Provider) {
 		nameToolResults(sent)
 	}
@@ -296,6 +304,23 @@ func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) 
 		(c.Provider == "gemini" || strings.Contains(strings.ToLower(c.BaseURL), "generativelanguage.googleapis.com")) {
 		if retryBody, retryStatus, rerr := doChat(true); rerr == nil && retryStatus < 400 {
 			body, statusCode = retryBody, retryStatus
+		}
+	}
+	// v0.9.15: a provider that does not take reasoning_content back
+	// may reject it (400). Retry once without it, and keep it off for
+	// this client.
+	if statusCode == 400 && hasReasoning(reqBody.Messages) {
+		activity.add("", "retry", "Provider rejected the model's earlier thinking (400) — retrying without it", truncate(string(body), 400), false)
+		reqBody.Messages = stripReasoning(reqBody.Messages)
+		sent = stripReasoning(sent)
+		if d, merr := json.Marshal(reqBody); merr == nil {
+			data = d
+			if rb, rs, rerr := doChat(false); rerr == nil {
+				body, statusCode = rb, rs
+				if rs < 400 {
+					c.noReasoning = true
+				}
+			}
 		}
 	}
 	// v0.8: a 400 on a history with tool calls is almost always the
@@ -604,7 +629,7 @@ func flattenToolHistory(msgs []Message) []Message {
 			}
 			out = append(out, Message{Role: "user", Content: "[result of " + n + "]\n" + c})
 		default:
-			m.ToolCalls, m.ToolCallID, m.Name = nil, "", ""
+			m.ToolCalls, m.ToolCallID, m.Name, m.ReasoningContent = nil, "", "", ""
 			out = append(out, m)
 		}
 	}
