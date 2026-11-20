@@ -45,6 +45,8 @@ func systemPrompt(userName, memory, baseURL, model string) string {
 	b.WriteString("- Use the remember tool for durable facts, preferences and decisions the user tells you.\n")
 	b.WriteString("- If a tool fails, report what actually happened and try another supported approach before giving up.\n\n")
 
+	b.WriteString(serversPrompt())
+
 	if strings.TrimSpace(memory) != "" {
 		b.WriteString("What you remember about the user:\n")
 		b.WriteString(memory)

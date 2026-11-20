@@ -29,6 +29,10 @@ type Server struct {
 	KeyPath  string `json:"key_path,omitempty"`
 	Enabled  bool   `json:"enabled"`
 	LastSeen string `json:"last_seen,omitempty"`
+	// Password is optional (key login is preferred). Stored only in
+	// servers.json (mode 0600) and never sent back to the browser.
+	Password    string `json:"password,omitempty"`
+	HasPassword bool   `json:"has_password,omitempty"`
 }
 
 type Goal struct {
@@ -92,7 +96,15 @@ func loadServers() []Server {
 	loadJSON("servers.json", &s)
 	return s
 }
-func saveServers(s []Server) error { return saveJSON("servers.json", s) }
+func saveServers(s []Server) error {
+	for i := range s {
+		s[i].HasPassword = false
+	}
+	if err := saveJSON("servers.json", s); err != nil {
+		return err
+	}
+	return os.Chmod(storePath("servers.json"), 0o600)
+}
 
 func loadGoals() []Goal {
 	var g []Goal

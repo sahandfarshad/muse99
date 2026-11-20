@@ -826,23 +826,122 @@ func (s *webServer) handleFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *webServer) handleServers(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
+	switch r.Method {
+	case http.MethodPost:
 		var srv Server
 		_ = json.NewDecoder(r.Body).Decode(&srv)
+		srv.Name = strings.TrimSpace(srv.Name)
+		srv.Host = strings.TrimSpace(srv.Host)
+		srv.User = strings.TrimSpace(srv.User)
 		if srv.Host == "" || srv.User == "" {
 			http.Error(w, "need host and user", http.StatusBadRequest)
 			return
+		}
+		if srv.Name == "" {
+			srv.Name = srv.Host
 		}
 		if srv.Port == 0 {
 			srv.Port = 22
 		}
 		srv.Enabled = true
 		servers := loadServers()
-		servers = append(servers, srv)
-		_ = saveServers(servers)
+		replaced := false
+		for i, old := range servers {
+			if old.Name == srv.Name {
+				if srv.Password == "" {
+					srv.Password = old.Password
+				}
+				servers[i] = srv
+				replaced = true
+			}
+		}
+		if !replaced {
+			servers = append(servers, srv)
+		}
+		if err := saveServers(servers); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		var keep []Server
+		for _, sv := range loadServers() {
+			if sv.Name != name {
+				keep = append(keep, sv)
+			}
+		}
+		_ = saveServers(keep)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(loadServers())
+	_ = json.NewEncoder(w).Encode(publicServers())
+}
+
+// publicServers is the server list without passwords.
+func publicServers() []Server {
+	out := []Server{}
+	for _, sv := range loadServers() {
+		sv.HasPassword = sv.Password != ""
+		sv.Password = ""
+		out = append(out, sv)
+	}
+	return out
+}
+
+// handleServerKey serves GET /api/servers/key: Muse99's public key and
+// the one-line command that installs it on a server.
+func (s *webServer) handleServerKey(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, pub, err := museKey()
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "public_key": pub, "command": keyInstallCommand(pub)})
+}
+
+// handleServerAction serves POST /api/servers/test and
+// /api/servers/installkey {name}.
+func (s *webServer) handleServerAction(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	var srv Server
+	found := false
+	for _, sv := range loadServers() {
+		if sv.Name == body.Name {
+			srv, found = sv, true
+		}
+	}
+	if !found {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no such server"})
+		return
+	}
+	cmd := "echo connected as $(whoami) on $(hostname); uname -sr"
+	if strings.HasSuffix(r.URL.Path, "/installkey") {
+		if srv.Password == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "add the password first, or run the key command on the server yourself"})
+			return
+		}
+		_, pub, err := museKey()
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		cmd = keyInstallCommand(pub)
+	}
+	activity.add("servers", "tool", "SSH "+srv.Name, cmd, false)
+	out, err := runRemote(srv, cmd, 30*time.Second)
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "output": out})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "output": strings.TrimSpace(out)})
 }
 
 func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -1031,6 +1130,9 @@ func buildMux(s *webServer) *http.ServeMux {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/models/fallback", s.handleModelFallback)
+	mux.HandleFunc("/api/servers/key", s.handleServerKey)
+	mux.HandleFunc("/api/servers/test", s.handleServerAction)
+	mux.HandleFunc("/api/servers/installkey", s.handleServerAction)
 	mux.HandleFunc("/api/memory", s.handleMemory)
 	mux.HandleFunc("/api/clear", s.handleClear)
 	mux.HandleFunc("/api/chat", s.handleChat)
@@ -1232,7 +1334,7 @@ h3.sec+.note{margin:0 0 20px;font-size:14px;color:var(--ink2)}
 <div id="pane-files" class="pane"><h3 class="sec">Files</h3><p class="note">Everything in your workdir. Click a file to read it.</p><div id="filelist"></div><pre id="fileview">Click a file to view it.</pre></div>
 <div id="pane-tasks" class="pane"><h3 class="sec">Tasks</h3><p class="note">Give it a goal. It plans, builds, tests, fixes, and only stops when it can say DONE.</p><div class="card"><div class="modelrow"><input id="taskgoal" placeholder="Build a todo app in ./todo-app with tests…"><button class="btn primary" onclick="startTask()">Start task</button></div></div><div id="tasklist"></div></div>
 <div id="pane-memory" class="pane"><h3 class="sec">Memory</h3><p class="note">What Muse99 remembers about you, used in every chat. Delete one to forget it.</p><div id="memlist"></div><button class="btn" onclick="summariseChat()">Summarise this chat into memory</button><div class="card" style="margin-top:22px"><h3>Memory file</h3><p class="sub">MEMORY.md, exported from the database.</p><textarea id="mem" rows="12"></textarea><div class="savebar" style="margin-top:12px"><button class="btn primary" onclick="saveMemory()">Save memory file</button></div></div></div>
-<div id="pane-servers" class="pane"><h3 class="sec">Servers</h3><p class="note">Only if you want it to. Remote commands use your system ssh key.</p><div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="srv-name" placeholder="Name" style="flex:1;min-width:120px"><input id="srv-user" placeholder="user" style="flex:1;min-width:120px"><input id="srv-host" placeholder="host / IP" style="flex:1;min-width:140px"><input id="srv-port" placeholder="22" style="width:80px"></div><div class="savebar" style="margin-top:12px"><button class="btn primary" onclick="addServer()">Add server</button></div></div><div id="srvlist" style="margin-top:14px"></div></div>
+<div id="pane-servers" class="pane"><h3 class="sec">Servers</h3><p class="note">Add a server and Muse99 can run commands there for you (just say "on myserver, do …"). Login with a password, or better with Muse99's key (below).</p><div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="srv-name" placeholder="Name (e.g. myserver)" style="flex:1;min-width:120px"><input id="srv-user" placeholder="user (e.g. root)" style="flex:1;min-width:110px"><input id="srv-host" placeholder="host / IP" style="flex:1;min-width:140px"><input id="srv-port" placeholder="22" style="width:70px"><input id="srv-pass" type="password" autocomplete="new-password" placeholder="password (optional)" style="flex:1;min-width:150px"></div><div class="savebar" style="margin-top:12px"><button class="btn primary" onclick="addServer()">Save server</button></div></div><div class="card" style="margin-top:14px"><b>Muse99's key (safer than a password)</b><p class="note">Log in to your new server once (e.g. with PuTTY or ssh) and paste this one line there. Nothing to copy back. After that Muse99 can log in without the password. Or press "Install key" on a server that has a password.</p><pre id="srv-keycmd" style="white-space:pre-wrap;word-break:break-all;font-size:12px;background:var(--surface);padding:10px;border-radius:8px;border:1px solid var(--line)">…</pre><button class="btn" onclick="copyKeyCmd()">Copy command</button></div><div id="srvlist" style="margin-top:14px"></div></div>
 <div id="pane-settings" class="pane"><h3 class="sec">Settings</h3><p class="note">Your model, your server, your rules.</p><div class="savebar"><button class="btn primary" onclick="saveSettings()">Save settings</button><span class="note" style="margin:0">Saved to ~/.muse99/config.json (600).</span></div>
 <div class="card"><h3>Provider &amp; model</h3><p class="sub">Pick a provider, fetch its models, click one to test it and set it active.</p>
 <label>Provider</label><select id="set-provider"></select>
@@ -1322,8 +1424,12 @@ async function loadTasks(){const r=await fetch('/api/task');const j=await r.json
 async function startTask(){const g=document.getElementById('taskgoal').value.trim();if(!g)return;const r=await fetch('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal:g})});const j=await r.json().catch(()=>({}));document.getElementById('taskgoal').value='';setTimeout(loadTasks,1000);add('Started autonomous task: '+g+(j.task_id?' ('+j.task_id+')':''),'muse');refreshTaskBar();}
 async function loadMemory(){const r=await fetch('/api/memory');const j=await r.json();document.getElementById('mem').value=j.memory||'';}
 async function saveMemory(){await fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({memory:document.getElementById('mem').value})});toast('Saved ✓');}
-async function loadServers(){const r=await fetch('/api/servers');const j=await r.json();document.getElementById('srvlist').innerHTML=j.map(s=>'<div class="card">'+escapeHtml(s.name||'')+' — '+escapeHtml(s.user||'')+'@'+escapeHtml(s.host||'')+':'+escapeHtml(String(s.port||22))+'</div>').join('')||'<div class="empty">(no servers — Muse99 only uses servers you add here)</div>';}
-async function addServer(){const b={name:document.getElementById('srv-name').value,user:document.getElementById('srv-user').value,host:document.getElementById('srv-host').value,port:parseInt(document.getElementById('srv-port').value||'22')};await fetch('/api/servers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});loadServers();}
+async function loadServers(){const r=await fetch('/api/servers');const j=await r.json();window._servers=j;document.getElementById('srvlist').innerHTML=j.map((s,i)=>'<div class="card"><b>'+escapeHtml(s.name||'')+'</b> — '+escapeHtml(s.user||'')+'@'+escapeHtml(s.host||'')+':'+escapeHtml(String(s.port||22))+(s.has_password?' · 🔑 password saved':'')+'<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn" onclick="srvAct('+i+',\'test\')">Test connection</button>'+(s.has_password?'<button class="btn" onclick="srvAct('+i+',\'installkey\')">Install key</button>':'')+'<button class="btn" onclick="srvDel('+i+')">Delete</button></div><div class="note" id="srvout-'+i+'"></div></div>').join('')||'<div class="empty">(no servers yet)</div>';try{const k=await (await fetch('/api/servers/key')).json();document.getElementById('srv-keycmd').textContent=k.ok?k.command:('error: '+k.error);}catch(e){}}
+async function addServer(){const b={name:document.getElementById('srv-name').value,user:document.getElementById('srv-user').value,host:document.getElementById('srv-host').value,port:parseInt(document.getElementById('srv-port').value||'22'),password:document.getElementById('srv-pass').value};const r=await fetch('/api/servers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});if(!r.ok){toast('Need user and host','err');return;}document.getElementById('srv-pass').value='';toast('Server saved');loadServers();}
+async function srvAct(i,act){const s=(window._servers||[])[i];if(!s)return;const o=document.getElementById('srvout-'+i);o.textContent=act==='test'?'Connecting…':'Installing key…';try{const j=await (await fetch('/api/servers/'+act,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:s.name})})).json();o.textContent=(j.ok?'✓ ':'✗ ')+(j.ok?j.output:j.error);}catch(e){o.textContent='✗ '+e;}}
+async function srvDel(i){const s=(window._servers||[])[i];if(!s||!confirm('Delete server '+s.name+'?'))return;await fetch('/api/servers?name='+encodeURIComponent(s.name),{method:'DELETE'});loadServers();}
+function copyKeyCmd(){const t=document.getElementById('srv-keycmd').textContent;if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(()=>toast('Copied')).catch(()=>selKeyCmd());}else{selKeyCmd();}}
+function selKeyCmd(){const el=document.getElementById('srv-keycmd');const rg=document.createRange();rg.selectNodeContents(el);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(rg);try{document.execCommand('copy');toast('Copied');}catch(e){toast('Selected — press Ctrl+C');}}
 // --- model discovery (v6): clickable list, click-to-test, set active ---
 // No model text input any more: Fetch models, click a model to test
 // it, press Set active. The only typing is the hidden manual fallback.

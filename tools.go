@@ -39,7 +39,7 @@ func toolDefinitions() []ToolDef {
 		def("list_files", "List files in a directory.", map[string]any{"path": str()}, []string{"path"}),
 		def("search_files", "Search file contents for text (like grep -r). Returns file:line matches.", map[string]any{"query": str(), "path": str()}, []string{"query"}),
 		def("run_shell", "Run a shell command, return stdout/stderr. Use for build, test, git, docker.", map[string]any{"command": str()}, []string{"command"}),
-		def("remote_shell", "Run a command on a remote server you have access to, via ssh. server is a name from servers.json, or user@host. Only use servers the user explicitly gave you access to.", map[string]any{"server": str(), "command": str()}, []string{"server", "command"}),
+		def("remote_shell", "Run a command on one of the user's servers over SSH. server = the server's name from the Servers list in your instructions.", map[string]any{"server": str(), "command": str()}, []string{"server", "command"}),
 		def("git_run", "Run a safe git command in the workdir, e.g. status, log --oneline -10, diff --stat, add, commit -m.", map[string]any{"command": str()}, []string{"command"}),
 		def("fetch_url", "Fetch a URL as clean text (title + main text). Lightweight HTTP fetch by default.", map[string]any{"url": str()}, []string{"url"}),
 		def("browse_url", "Browse a URL and return its title and clean text. Set js=true only when the page needs JavaScript — that uses headless Chromium (~300-500 MB RAM) if installed, and returns a clear install message if it is not.", map[string]any{"url": str(), "js": boolean()}, []string{"url"}),
@@ -180,25 +180,15 @@ func (r *toolRunner) run(name, argsJSON string) string {
 		return r.shell(get("command"), r.workdir)
 
 	case "remote_shell":
-		if !r.shellAllowed() {
-			return "error: shell is disabled. Turn on 'Allow shell commands' in the web UI (Settings) or the SSH menu."
+		srv, ok := findServer(get("server"))
+		if !ok {
+			return "error: unknown server " + strconvQuote(get("server")) + ". Only servers the user added in the Servers tab can be used."
 		}
-		server := get("server")
-		// Resolve a named server from servers.json
-		target := server
-		for _, s := range loadServers() {
-			if s.Name == server && s.Enabled {
-				target = fmt.Sprintf("%s@%s", s.User, s.Host)
-				if s.Port != 0 && s.Port != 22 {
-					target = fmt.Sprintf("-p %d %s", s.Port, target)
-				}
-				break
-			}
+		out, err := runRemote(srv, get("command"), shellTimeout())
+		if err != nil {
+			return "error: " + err.Error() + "\n" + truncate(out, 20000)
 		}
-		// Use the system ssh binary — no extra Go dependency, works on Ubuntu.
-		// StrictHostKeyChecking is left on by default for safety.
-		cmd := fmt.Sprintf("ssh -o BatchMode=yes -o ConnectTimeout=10 %s %q", target, get("command"))
-		return r.shell(cmd, r.workdir)
+		return truncate(out, 20000)
 
 	case "git_run":
 		if !r.shellAllowed() {
@@ -358,3 +348,5 @@ func truncate(s string, n int) string {
 	}
 	return s
 }
+
+func strconvQuote(s string) string { return fmt.Sprintf("%q", s) }

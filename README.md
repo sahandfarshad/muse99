@@ -153,6 +153,12 @@ Marketplace providers (AiPrime, OpenRouter) price a request by its worst case. W
 
 When the connection drops or the provider is busy (connection reset, timeout, 429, 5xx, "no seller right now"), Muse99 waits and retries: 5 s, 15 s, 30 s, 1 min, 2 min. You see the countdown in Behind the scenes. If it still fails, the steps and files so far are kept; send "continue". Old tool outputs are shortened in what is sent (the chat keeps them whole), so long tasks cost fewer tokens.
 
+## Your servers (SSH)
+
+In the **Servers** tab add a name, user, host, port and, if you like, the password. Then just tell Muse99 "on myserver, check the disk". It connects with its own SSH client (no system ssh needed, and the local Shell switch is not needed for this), trusts a server's host key the first time and refuses if it ever changes, and only uses servers saved in this list.
+
+Safer than a password: the tab shows Muse99's own key as one ready command with a **Copy** button. Log in to the new server once, paste that line, done; nothing to copy back. A server with a saved password also gets an **Install key** button that does it for you. **Test connection** shows who it logged in as. Passwords stay in `~/.muse99/servers.json` (readable only by you) and are never sent back to the browser.
+
 ## Switch model mid-chat, and a backup model
 
 The model menu at the top of the chat lists the models you used recently. Pick another one at any time: the chat, its steps and files stay, and the next message goes to the new model (send "continue" to carry on). Next to it, **Backup** picks a model that takes over by itself when the main one still fails after its retries; the reply then says it finished with the backup.
