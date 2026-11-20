@@ -54,6 +54,8 @@ type FileConfig struct {
 	// model used when the main one keeps failing.
 	RecentModels []ModelRef `json:"recent_models,omitempty"`
 	Fallback     *ModelRef  `json:"fallback,omitempty"`
+	// v0.9.5: seconds to wait between model calls (0 = off).
+	CallDelaySec int `json:"call_delay_sec,omitempty"`
 }
 
 // Provider presets. All are OpenAI-compatible /chat/completions endpoints,

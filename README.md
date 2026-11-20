@@ -153,6 +153,12 @@ Marketplace providers (AiPrime, OpenRouter) price a request by its worst case. W
 
 When the connection drops or the provider is busy (connection reset, timeout, 429, 5xx, "no seller right now"), Muse99 waits and retries: 5 s, 15 s, 30 s, 1 min, 2 min. You see the countdown in Behind the scenes. If it still fails, the steps and files so far are kept; send "continue". Old tool outputs are shortened in what is sent (the chat keeps them whole), so long tasks cost fewer tokens.
 
+## Pace (free models with a per-minute limit)
+
+The **Pace** menu at the top of the chat makes Muse99 wait 1 to 60 seconds between one model call ending and the next starting. Free models such as OpenRouter's `:free` ones allow only a few requests a minute; 3 to 10 s keeps a long task from hitting that limit. Saved in `config.json` (`call_delay_sec`), or set `MUSE99_CALL_DELAY=5`. If a 429 still happens, the normal retry waits take over.
+
+Persian and Arabic replies are laid out right-to-left line by line, so a reply that starts with an English word (a name, a command) no longer flips the whole bubble; code stays left-to-right.
+
 ## Your servers (SSH)
 
 In the **Servers** tab add a name, user, host, port and, if you like, the password. Then just tell Muse99 "on myserver, check the disk". It connects with its own SSH client (no system ssh needed, and the local Shell switch is not needed for this), trusts a server's host key the first time and refuses if it ever changes, and only uses servers saved in this list.

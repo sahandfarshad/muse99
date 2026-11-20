@@ -641,7 +641,9 @@ var retryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.S
 // A real error (bad key, bad request) returns at once.
 func (c *Client) Chat(messages []Message, tools []ToolDef) (Message, error) {
 	for attempt := 0; ; attempt++ {
+		paceWait()
 		msg, err := c.chatOnce(messages, tools)
+		paceDone()
 		if err == nil || c.NoRetry || !isTransientError(err) || attempt >= len(retryDelays) {
 			if err != nil && attempt > 0 {
 				err = fmt.Errorf("%w (gave up after %d retries)", err, attempt)

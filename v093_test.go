@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBackupModelTakesOver(t *testing.T) {
@@ -83,5 +84,23 @@ func TestModelMenuAndBackupAPI(t *testing.T) {
 	call("POST", "/api/models/fallback", `{"provider":"","model":""}`)
 	if s.fallbackClient() != nil {
 		t.Fatal("backup not cleared")
+	}
+}
+
+func TestPaceWaits(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MUSE99_CALL_DELAY", "1")
+	paceDone()
+	start := time.Now()
+	paceWait()
+	if time.Since(start) < 900*time.Millisecond {
+		t.Fatal("did not wait")
+	}
+	t.Setenv("MUSE99_CALL_DELAY", "")
+	fc := loadFileConfig()
+	fc.CallDelaySec = 7
+	_ = saveFileConfig(fc)
+	if callPace() != 7*time.Second {
+		t.Fatal("saved pace not used")
 	}
 }
