@@ -454,6 +454,9 @@ func runTurnWithContext(client, fallback *Client, runner *toolRunner, tools []To
 		t, d := describeReply(msg)
 		activity.finish(aid, true, t, d)
 		*messages = append(*messages, msg)
+		if len(msg.ToolCalls) > 0 {
+			liveSay(msg.Content)
+		}
 
 		if len(msg.ToolCalls) == 0 {
 			if strings.TrimSpace(msg.Content) == "" {
