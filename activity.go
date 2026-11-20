@@ -27,6 +27,8 @@ type ActivityEvent struct {
 	End     int64  `json:"end,omitempty"`
 	Pending bool   `json:"pending"`
 	OK      bool   `json:"ok"`
+	Chat    string `json:"chat,omitempty"` // v0.9.6: chat id the event belongs to
+	key     string // DB key once saved
 }
 
 type activityLog struct {
@@ -46,6 +48,10 @@ func nowMs() int64 { return time.Now().UnixMilli() }
 func (a *activityLog) add(source, kind, title, detail string, pending bool) int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.nextID == 0 {
+		// Unique across restarts, so saved and live events never clash.
+		a.nextID = nowMs() * 1000
+	}
 	a.nextID++
 	a.seq++
 	ev := &ActivityEvent{ID: a.nextID, Seq: a.seq, Source: source, Kind: kind, Title: title,
@@ -53,6 +59,10 @@ func (a *activityLog) add(source, kind, title, detail string, pending bool) int6
 	if !pending {
 		ev.End = ev.Start
 	}
+	if source == "chat" || source == "" || source == "servers" {
+		ev.Chat = currentActivityChat()
+	}
+	saveActivityEvent(ev)
 	a.events = append(a.events, ev)
 	if len(a.events) > activityMax {
 		a.events = a.events[len(a.events)-activityMax:]
@@ -80,6 +90,7 @@ func (a *activityLog) finish(id int64, ok bool, title, detail string) {
 		if detail != "" {
 			ev.Detail = redactActivity(truncate(detail, activityDetailMax))
 		}
+		saveActivityEvent(ev)
 		return
 	}
 }
@@ -129,12 +140,47 @@ func redactActivity(s string) string {
 	return s
 }
 
+// clearChat drops one chat's live events.
+func (a *activityLog) clearChat(chat string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	keep := a.events[:0]
+	for _, ev := range a.events {
+		if ev.Chat != chat {
+			keep = append(keep, ev)
+		}
+	}
+	a.events = keep
+	a.seq++
+}
+
 // GET /api/activity?since=<seq>  -> {events, seq, now}
-// DELETE /api/activity            -> clear the panel
+// GET /api/activity?chat=<id>    -> that chat's saved events
+// DELETE /api/activity[?chat=id] -> clear the panel (one chat or all)
 func (s *webServer) handleActivity(w http.ResponseWriter, r *http.Request) {
+	chat := r.URL.Query().Get("chat")
 	if r.Method == http.MethodDelete {
-		activity.clear()
+		if chat != "" {
+			activity.clearChat(chat)
+			if appDB != nil {
+				_ = appDB.DeleteActivity(chat)
+			}
+		} else {
+			activity.clear()
+		}
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if chat != "" {
+		var evs []ActivityEvent
+		if appDB != nil {
+			evs = appDB.LoadActivity(chat, activityPerChat)
+		}
+		if evs == nil {
+			evs = []ActivityEvent{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"events": evs, "now": nowMs()})
 		return
 	}
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)

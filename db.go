@@ -117,7 +117,7 @@ func OpenDB(path string) (*DB, error) {
 	}
 	d := &DB{bolt: bolt, path: path}
 	err = bolt.Update(func(tx *bbolt.Tx) error {
-		for _, b := range [][]byte{bucketChats, bucketMessages, bucketMemories, bucketMeta, bucketModelLists} {
+		for _, b := range [][]byte{bucketChats, bucketMessages, bucketMemories, bucketMeta, bucketModelLists, bucketActivity} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -233,6 +233,17 @@ func (d *DB) DeleteChat(id string) error {
 		}
 		for _, k := range keys {
 			_ = mb.Delete(k)
+		}
+		// v0.9.6: and its Behind the scenes history.
+		if ab := tx.Bucket(bucketActivity); ab != nil {
+			var ak [][]byte
+			ac := ab.Cursor()
+			for k, _ := ac.Seek(prefix); k != nil && strings.HasPrefix(string(k), string(prefix)); k, _ = ac.Next() {
+				ak = append(ak, append([]byte{}, k...))
+			}
+			for _, k := range ak {
+				_ = ab.Delete(k)
+			}
 		}
 		return nil
 	})

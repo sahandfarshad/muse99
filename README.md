@@ -153,6 +153,12 @@ Marketplace providers (AiPrime, OpenRouter) price a request by its worst case. W
 
 When the connection drops or the provider is busy (connection reset, timeout, 429, 5xx, "no seller right now"), Muse99 waits and retries: 5 s, 15 s, 30 s, 1 min, 2 min. You see the countdown in Behind the scenes. If it still fails, the steps and files so far are kept; send "continue". Old tool outputs are shortened in what is sent (the chat keeps them whole), so long tasks cost fewer tokens.
 
+## Database tab and per-chat Behind the scenes
+
+Each chat keeps its own **Behind the scenes** history, saved in the database (last 500 steps per chat), so it is still there after a restart and switching chats shows that chat's steps. **Clear** in the panel clears only the open chat.
+
+The **Database** tab lists what `muse99.db` holds: chats, messages, memories, Behind the scenes history, usage totals and saved model lists, with counts and sizes. Open a section, search, click an entry to read it, and delete what you don't want. Deleting a chat also deletes its messages and its history.
+
 ## Pace (free models with a per-minute limit)
 
 The **Pace** menu at the top of the chat makes Muse99 wait 1 to 60 seconds between one model call ending and the next starting. Free models such as OpenRouter's `:free` ones allow only a few requests a minute; 3 to 10 s keeps a long task from hitting that limit. Saved in `config.json` (`call_delay_sec`), or set `MUSE99_CALL_DELAY=5`. If a 429 still happens, the normal retry waits take over.
