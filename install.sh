@@ -94,11 +94,25 @@ TMP="$(mktemp -d)"
 # stuck; in logs or CI it stays quiet. Goes to stderr, so it still
 # shows when the script runs as `curl … | bash`.
 download_binary() {
-  if [ -t 2 ] && [ -z "${MUSE99_QUIET:-}" ]; then
-    curl -fL --progress-bar --connect-timeout 20 --retry 3 -o "$TMP/muse99" "$URL"
-  else
-    curl -fsSL --connect-timeout 20 --retry 3 -o "$TMP/muse99" "$URL"
-  fi
+  # Resumes after a dropped connection (-C -) instead of starting over:
+  # up to 10 tries, each continuing from the bytes already saved.
+  # Returns 22 for an HTTP error such as 404 (no release).
+  DL_TRIES=0
+  rm -f "$TMP/muse99"
+  while :; do
+    DL_TRIES=$((DL_TRIES + 1))
+    if [ -t 2 ] && [ -z "${MUSE99_QUIET:-}" ]; then
+      curl -fL --progress-bar -C - --connect-timeout 20 --speed-limit 1024 --speed-time 30 -o "$TMP/muse99" "$URL"
+    else
+      curl -fsSL -C - --connect-timeout 20 --speed-limit 1024 --speed-time 30 -o "$TMP/muse99" "$URL"
+    fi
+    DL_CODE=$?
+    [ "$DL_CODE" -eq 0 ] && return 0
+    [ "$DL_CODE" -eq 22 ] && return 22
+    [ "$DL_TRIES" -ge 10 ] && return "$DL_CODE"
+    echo "   Connection dropped (curl error $DL_CODE). Resuming from where it stopped, try $((DL_TRIES + 1)) of 10…" >&2
+    sleep 3
+  done
 }
 trap 'rm -rf "$TMP"' EXIT
 
@@ -110,13 +124,16 @@ elif ! download_binary; then
   echo "ERROR: could not download Muse99 from:" >&2
   echo "  $URL" >&2
   echo "" >&2
-  echo "That usually means no release exists yet for this version." >&2
-  echo "Create one first (from your laptop, in the repo):" >&2
-  echo "  git tag v0.1.0" >&2
-  echo "  git push origin v0.1.0" >&2
-  echo "Then wait a minute for GitHub Actions to build and publish" >&2
-  echo "muse99-linux-amd64 and muse99-linux-arm64, and run this installer again." >&2
-  echo "This installer does not fall back to compiling — the binary is the point." >&2
+  if [ "${DL_CODE:-0}" -eq 22 ]; then
+    echo "GitHub answered with an error, which usually means no release exists" >&2
+    echo "yet for this version. Push a tag (git tag v0.1.0 && git push origin v0.1.0)," >&2
+    echo "wait a minute for GitHub Actions, then run this installer again." >&2
+  else
+    echo "The connection to GitHub kept dropping ($DL_TRIES tries, curl error $DL_CODE)." >&2
+    echo "Run the same command again later, or download the file on another" >&2
+    echo "computer, copy it to this server, and install it with:" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/sahandfarshad/muse99/main/install.sh | LOCAL_BINARY=/root/muse99-linux-$GO_ARCH bash" >&2
+  fi
   exit 1
 fi
 
