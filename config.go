@@ -61,6 +61,8 @@ type FileConfig struct {
 	CompactTokens int `json:"compact_tokens,omitempty"`
 	// v0.9.15: which earlier thinking is sent back: "" (= turn), all, off.
 	ThinkingKeep string `json:"thinking_keep,omitempty"`
+	// v0.9.17: the user's price per 1M tokens for each model id.
+	Prices map[string]ModelPrice `json:"prices,omitempty"`
 }
 
 // Provider presets. All are OpenAI-compatible /chat/completions endpoints,

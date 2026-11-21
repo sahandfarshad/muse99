@@ -44,6 +44,11 @@ type UsageTotals struct {
 	// v0.9.10: input tokens the provider served from its cache.
 	CachedTokens int `json:"cached_tokens,omitempty"`
 	ByModel   map[string]*ModelUsage `json:"by_model,omitempty"`
+	// v0.9.17: cost at the user's own prices (Settings > Model prices),
+	// worked out per call. UnpricedCalls = calls of a model with no price.
+	CostUSD       float64 `json:"cost_usd,omitempty"`
+	CostToman     float64 `json:"cost_toman,omitempty"`
+	UnpricedCalls int     `json:"unpriced_calls,omitempty"`
 }
 
 // ModelUsage is the token count for one model.
@@ -56,6 +61,8 @@ type ModelUsage struct {
 	Calls            int       `json:"calls"`
 	CachedTokens     int       `json:"cached_tokens,omitempty"`
 	LastUsed         time.Time `json:"last_used"`
+	CostUSD          float64   `json:"cost_usd,omitempty"`
+	CostToman        float64   `json:"cost_toman,omitempty"`
 }
 
 var (
@@ -120,6 +127,7 @@ func recordUsageFor(provider, model string, prompt, completion int) UsageTotals 
 	u.LastTotal = prompt + completion
 	u.LastLabel = usageLabel
 	u.LastModel = model
+	var mu *ModelUsage
 	if model != "" {
 		if u.ByModel == nil {
 			u.ByModel = map[string]*ModelUsage{}
@@ -137,7 +145,9 @@ func recordUsageFor(provider, model string, prompt, completion int) UsageTotals 
 		m.TotalTokens += prompt + completion
 		m.Calls++
 		m.LastUsed = time.Now()
+		mu = m
 	}
+	addCost(&u, mu, model, prompt, completion)
 	u.EstimatedCostUSD = estimatedCost(u.PromptTokens, u.CompletionTokens)
 	u.UpdatedAt = time.Now()
 	_ = saveJSON("usage.json", u)
@@ -165,6 +175,7 @@ func usageTotalsJSON() map[string]any {
 		"last_prompt_tokens": u.LastPromptTokens, "last_completion_tokens": u.LastCompletion,
 		"last_total_tokens": u.LastTotal, "last_label": u.LastLabel,
 		"last_model": u.LastModel, "by_model": modelUsageList(u),
+		"cost_usd": round6(u.CostUSD), "cost_toman": round6(u.CostToman), "unpriced_calls": u.UnpricedCalls,
 	}
 }
 
@@ -194,6 +205,10 @@ type usageDelta struct {
 	Calls            int    `json:"calls"`
 	CachedTokens     int    `json:"cached_tokens,omitempty"`
 	Model            string `json:"model,omitempty"`
+	// v0.9.17: cost at the user's prices; Unpriced = calls with no price.
+	CostUSD   float64 `json:"cost_usd,omitempty"`
+	CostToman float64 `json:"cost_toman,omitempty"`
+	Unpriced  int     `json:"unpriced,omitempty"`
 }
 
 func diffUsage(before, after UsageTotals) usageDelta {
@@ -203,6 +218,9 @@ func diffUsage(before, after UsageTotals) usageDelta {
 		TotalTokens:      after.TotalTokens - before.TotalTokens,
 		Calls:            after.Calls - before.Calls,
 		CachedTokens:     after.CachedTokens - before.CachedTokens,
+		CostUSD:          round6(after.CostUSD - before.CostUSD),
+		CostToman:        round6(after.CostToman - before.CostToman),
+		Unpriced:         after.UnpricedCalls - before.UnpricedCalls,
 	}
 	models := []string{}
 	for name, m := range after.ByModel {

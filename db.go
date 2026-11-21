@@ -928,6 +928,9 @@ func (d *DB) AddChatUsage(id string, u usageDelta) (Chat, error) {
 		ch.Tokens.TotalTokens += u.TotalTokens
 		ch.Tokens.Calls += u.Calls
 		ch.Tokens.CachedTokens += u.CachedTokens
+		ch.Tokens.CostUSD = round6(ch.Tokens.CostUSD + u.CostUSD)
+		ch.Tokens.CostToman = round6(ch.Tokens.CostToman + u.CostToman)
+		ch.Tokens.Unpriced += u.Unpriced
 		last := u
 		ch.LastTokens = &last
 		out = ch
