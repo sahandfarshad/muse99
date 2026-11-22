@@ -258,6 +258,9 @@ func (s *webServer) withAuth(next http.Handler) http.Handler {
 		if s.tlsActive {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
+		if s.desktopGate(w, r) {
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
 			http.Error(w, "cross-origin request blocked", http.StatusForbidden)
 			return

@@ -27,6 +27,9 @@ jobs:
           go test ./...
           GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=${GITHUB_REF_NAME}" -o muse99-linux-amd64 .
           GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=${GITHUB_REF_NAME}" -o muse99-linux-arm64 .
+          GOOS=windows go vet ./...
+          GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui -X main.Version=${GITHUB_REF_NAME}" -o Muse99.exe .
+          GOOS=windows GOARCH=amd64 go build -ldflags "-X main.Version=${GITHUB_REF_NAME}" -o muse99-cli.exe .
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -34,4 +37,6 @@ jobs:
           files: |
             muse99-linux-amd64
             muse99-linux-arm64
+            Muse99.exe
+            muse99-cli.exe
           generate_release_notes: true

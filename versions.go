@@ -90,6 +90,9 @@ func binaryVersion(bin string) string {
 // installRelease downloads a release (tag "" = latest), checks that it
 // runs, keeps the current binary as .prev, and swaps the new one in.
 func installRelease(tag string) error {
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("on Windows, download the new Muse99.exe from the Releases page and replace the old one (your data in %s stays)", configDir())
+	}
 	arch := runtime.GOARCH
 	if arch != "amd64" && arch != "arm64" {
 		return fmt.Errorf("unsupported architecture %s (only amd64/arm64 releases exist)", arch)

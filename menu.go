@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -41,6 +40,9 @@ func httpGet(url string) (*http.Response, error) {
 // handle to that process first (one owner at a time).
 
 func webAddressFor(cfg Config) string {
+	if cfg.WebAddr == "127.0.0.1" || cfg.Desktop {
+		return fmt.Sprintf("http://127.0.0.1:%d", cfg.WebPort)
+	}
 	if cfg.Domain != "" {
 		if cfg.TLSEnabled {
 			if cfg.WebPort == 443 || cfg.WebPort == 0 {
@@ -218,7 +220,7 @@ func startDetachedWeb(cfg Config) error {
 	cmd := exec.Command(exe, "--menu=false", "--web", "--port", strconv.Itoa(cfg.WebPort), "--addr", cfg.WebAddr)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachedAttr()
 	if err := cmd.Start(); err != nil {
 		return err
 	}

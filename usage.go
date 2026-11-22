@@ -40,10 +40,10 @@ type UsageTotals struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 	// v0.8: which model the last call used, and totals per model
 	// (key = model id as sent to the provider).
-	LastModel string                 `json:"last_model,omitempty"`
+	LastModel string `json:"last_model,omitempty"`
 	// v0.9.10: input tokens the provider served from its cache.
-	CachedTokens int `json:"cached_tokens,omitempty"`
-	ByModel   map[string]*ModelUsage `json:"by_model,omitempty"`
+	CachedTokens int                    `json:"cached_tokens,omitempty"`
+	ByModel      map[string]*ModelUsage `json:"by_model,omitempty"`
 	// v0.9.17: cost at the user's own prices (Settings > Model prices),
 	// worked out per call. UnpricedCalls = calls of a model with no price.
 	CostUSD       float64 `json:"cost_usd,omitempty"`

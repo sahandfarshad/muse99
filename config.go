@@ -73,7 +73,12 @@ func providerPresets() []Provider {
 		{Name: "openai", BaseURL: "https://api.openai.com/v1", Model: "gpt-5"},
 		{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "gemini-2.5-flash"},
 		{Name: "openrouter", BaseURL: "https://openrouter.ai/api/v1", Model: "openai/gpt-5"},
+		{Name: "lmstudio", BaseURL: "http://127.0.0.1:1234/v1", Model: "", APIKey: "lm-studio"},
 		{Name: "ollama", BaseURL: "http://localhost:11434/v1", Model: "llama3.1", APIKey: "ollama"},
+		{Name: "llamacpp", BaseURL: "http://127.0.0.1:8080/v1", Model: "", APIKey: "local"},
+		{Name: "jan", BaseURL: "http://127.0.0.1:1337/v1", Model: "", APIKey: "local"},
+		{Name: "vllm", BaseURL: "http://127.0.0.1:8000/v1", Model: "", APIKey: "local"},
+		{Name: "koboldcpp", BaseURL: "http://127.0.0.1:5001/v1", Model: "", APIKey: "local"},
 		{Name: "custom", BaseURL: "", Model: ""},
 	}
 }
@@ -111,6 +116,16 @@ func matchProvider(baseURL, model string) string {
 		return "openrouter"
 	case strings.Contains(b, "localhost:11434") || strings.Contains(b, "127.0.0.1:11434"):
 		return "ollama"
+	case isLocalURL(b) && strings.Contains(b, ":1234"):
+		return "lmstudio"
+	case isLocalURL(b) && strings.Contains(b, ":8080"):
+		return "llamacpp"
+	case isLocalURL(b) && strings.Contains(b, ":1337"):
+		return "jan"
+	case isLocalURL(b) && strings.Contains(b, ":8000"):
+		return "vllm"
+	case isLocalURL(b) && strings.Contains(b, ":5001"):
+		return "koboldcpp"
 	case b == "":
 		return "spark"
 	default:

@@ -8,12 +8,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -38,7 +36,7 @@ func toolDefinitions() []ToolDef {
 		def("edit_file", "Replace old_text with new_text in a file. Use for precise edits, not full rewrites.", map[string]any{"path": str(), "old_text": str(), "new_text": str()}, []string{"path", "old_text", "new_text"}),
 		def("list_files", "List files in a directory.", map[string]any{"path": str()}, []string{"path"}),
 		def("search_files", "Search file contents for text (like grep -r). Returns file:line matches.", map[string]any{"query": str(), "path": str()}, []string{"query"}),
-		def("run_shell", "Run a shell command, return stdout/stderr. Use for build, test, git, docker.", map[string]any{"command": str()}, []string{"command"}),
+		def("run_shell", "Run a shell command ("+shellName()+" on this computer), return stdout/stderr. Use for build, test, git, docker.", map[string]any{"command": str()}, []string{"command"}),
 		def("remote_shell", "Run a command on one of the user's servers over SSH. server = the server's name from the Servers list in your instructions.", map[string]any{"server": str(), "command": str()}, []string{"server", "command"}),
 		def("git_run", "Run a safe git command in the workdir, e.g. status, log --oneline -10, diff --stat, add, commit -m.", map[string]any{"command": str()}, []string{"command"}),
 		def("fetch_url", "Fetch a URL as clean text (title + main text). Lightweight HTTP fetch by default.", map[string]any{"url": str()}, []string{"url"}),
@@ -277,18 +275,9 @@ func (r *toolRunner) shell(command, dir string) string {
 func runShellWithTimeout(command, dir string, timeout time.Duration) string {
 	ctx, cancel := context.WithTimeout(ctl.context(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	cmd := shellCommand(ctx, command)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	// Own process group, so a timeout kills the whole tree (bash and
-	// everything it started), not just bash.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
 	cmd.WaitDelay = 3 * time.Second
 	out, err := cmd.CombinedOutput()
 	s := truncate(string(out), 10000)
@@ -296,7 +285,7 @@ func runShellWithTimeout(command, dir string, timeout time.Duration) string {
 		return "error: stopped by the user (Stop button); the command was killed.\n" + s
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Sprintf("error: command timed out after %s and was killed. For a server or long job, run it in the background (nohup ... &) and check its log.\n%s", timeout, s)
+		return fmt.Sprintf("error: command timed out after %s and was killed. For a server or long job, run it in the background (%s) and check its log.\n%s", timeout, backgroundHint(), s)
 	}
 	if err != nil {
 		return fmt.Sprintf("exit error: %v\n%s", err, s)

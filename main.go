@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -38,11 +39,14 @@ type Config struct {
 	AllowShell bool
 	Prompt     string
 	Web        bool
-	WebPort    int
-	WebAddr    string
-	Menu       bool
-	Task       string
-	Schedule   bool
+	// v0.10.0: desktop app (Windows double-click, or --desktop).
+	Desktop      bool
+	DesktopToken string
+	WebPort      int
+	WebAddr      string
+	Menu         bool
+	Task         string
+	Schedule     bool
 	// v5: uninstall. --uninstall removes the binary + service files
 	// (data only with --yes). `muse99 uninstall` is the same thing.
 	Uninstall    bool
@@ -82,6 +86,7 @@ func loadConfig() Config {
 	flag.StringVar(&cfg.Workdir, "workdir", envOr("MUSE_WORKDIR", mustCwd()), "Working directory for file/shell tools")
 	flag.StringVar(&cfg.Prompt, "prompt", "", "Single prompt, then exit (non-interactive)")
 	flag.BoolVar(&cfg.Web, "web", false, "Start web UI instead of terminal chat")
+	flag.BoolVar(&cfg.Desktop, "desktop", isDesktopDefault(os.Args[1:], runtime.GOOS), "Desktop app: local web UI on 127.0.0.1 in its own window, auto-connects to LM Studio (default on Windows when started with no arguments)")
 	flag.IntVar(&cfg.WebPort, "port", DefaultWebPort, "Web UI port (with --web)")
 	flag.StringVar(&cfg.WebAddr, "addr", "0.0.0.0", "Web UI address (with --web)")
 	flag.BoolVar(&cfg.Menu, "menu", true, "Show SSH menu on top (web address + options). Use --menu=false for plain terminal chat.")
@@ -183,6 +188,15 @@ func main() {
 		}
 	}
 	cfg := loadConfig()
+	if cfg.Desktop {
+		desktopLog()
+		if desktopHandOff() {
+			return // already running: its window was opened again
+		}
+		if line := autoConnectLocal(&cfg); line != "" {
+			fmt.Println(line)
+		}
+	}
 	// Uninstall runs before anything else — no API key, no DB needed.
 	if cfg.Uninstall {
 		if err := runUninstallCLI(cfg.UninstallYes); err != nil {
@@ -250,6 +264,13 @@ func main() {
 	fmt.Printf("Workdir: %s · Memory: %s\n", cfg.Workdir, cfg.MemoryPath)
 	if !cfg.AllowShell {
 		fmt.Println("Shell tool is off — run with --allow-shell to let me run commands.")
+	}
+	if cfg.Desktop {
+		if err := runDesktop(cfg, client, runner, tools, system); err != nil {
+			fmt.Println("Desktop app failed to start:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if cfg.Schedule {
 		runScheduler(client, runner, tools, system)

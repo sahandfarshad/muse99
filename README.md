@@ -31,6 +31,16 @@ VERSION=v0.1.0 INSTALL_DIR=$HOME/bin bash install.sh
 
 If no release exists yet, the installer stops with a clear error and tells you to create one (`git tag v0.1.0 && git push origin v0.1.0`) — it never silently falls back to compiling.
 
+## Windows desktop app — local model (LM Studio, Ollama, …)
+
+Download `Muse99.exe` from the latest release and double-click it. It opens Muse99 in its own window (Microsoft Edge app window), on `127.0.0.1` only, so nothing outside your computer can reach it, and no web login is needed. Close the window (or press **Quit** in the sidebar) to stop it. Your data lives in `%USERPROFILE%\.muse99`.
+
+**LM Studio, automatically:** start LM Studio's server (Developer tab → Start Server, port 1234) with a model such as OxCoder-9B. When no model is set up yet, Muse99 connects to it by itself at start, picking the loaded model first.
+
+**Any other local program:** Settings → **Local model** → *Find local servers* finds LM Studio (1234), Ollama (11434), llama.cpp / LocalAI (8080), Jan (1337), vLLM (8000) and KoboldCpp (5001) and lists their models; click one to use it. For anything else type its address (e.g. `127.0.0.1:5000`) and press *Check address*, or pick a provider in **Provider & model** and enter the base URL and model by hand.
+
+On Windows the shell tool uses PowerShell. `muse99-cli.exe` is the same program with a console, for the terminal chat and flags. Tip: give the model a long context in LM Studio (32K or more) — agents need it.
+
 ## SSH menu — web address on top
 
 Just run `muse99` over SSH:
