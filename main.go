@@ -252,7 +252,7 @@ func main() {
 	}
 
 	client := NewClient(cfg.BaseURL, cfg.APIKey, cfg.Model)
-	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: cfg.MemoryPath, allowShell: cfg.AllowShell, client: client}
+	runner := &toolRunner{workdir: cfg.Workdir, memoryPath: cfg.MemoryPath, allowShell: cfg.AllowShell, client: client, confine: cfg.Desktop}
 	tools := toolDefinitions()
 	runner.tools = tools
 	// Sub-agent delegate: a smaller autonomous turn with the same model.

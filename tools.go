@@ -51,7 +51,10 @@ type toolRunner struct {
 	workdir    string
 	memoryPath string
 	allowShell bool
-	shellMu    sync.Mutex
+	// confine (desktop app): file tools may only touch the work folder.
+	confine bool
+	wdMu    sync.RWMutex
+	shellMu sync.Mutex
 	// delegate is set by main for spawn_subtask — a sub-agent turn.
 	delegate func(task string) string
 	client   *Client
@@ -84,14 +87,21 @@ func (r *toolRunner) run(name, argsJSON string) string {
 
 	switch name {
 	case "read_file":
-		data, err := os.ReadFile(safePath(r.workdir, get("path")))
+		p, perr := r.safe(get("path"))
+		if perr != nil {
+			return "error: " + perr.Error()
+		}
+		data, err := os.ReadFile(p)
 		if err != nil {
 			return "error: " + err.Error()
 		}
 		return truncate(string(data), 20000)
 
 	case "write_file":
-		p := safePath(r.workdir, get("path"))
+		p, perr := r.safe(get("path"))
+		if perr != nil {
+			return "error: " + perr.Error()
+		}
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return "error: " + err.Error()
 		}
@@ -101,7 +111,10 @@ func (r *toolRunner) run(name, argsJSON string) string {
 		return fmt.Sprintf("wrote %s (%d bytes)", p, len(get("content")))
 
 	case "edit_file":
-		p := safePath(r.workdir, get("path"))
+		p, perr := r.safe(get("path"))
+		if perr != nil {
+			return "error: " + perr.Error()
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return "error: " + err.Error()
@@ -117,7 +130,10 @@ func (r *toolRunner) run(name, argsJSON string) string {
 		return "edited " + p
 
 	case "list_files":
-		p := safePath(r.workdir, get("path"))
+		p, perr := r.safe(get("path"))
+		if perr != nil {
+			return "error: " + perr.Error()
+		}
 		if p == "" {
 			p = r.workdir
 		}
@@ -137,7 +153,10 @@ func (r *toolRunner) run(name, argsJSON string) string {
 
 	case "search_files":
 		q := get("query")
-		root := safePath(r.workdir, get("path"))
+		root, perr := r.safe(get("path"))
+		if perr != nil {
+			return "error: " + perr.Error()
+		}
 		if root == "" {
 			root = r.workdir
 		}
@@ -283,7 +302,10 @@ func (r *toolRunner) scaffold(kind, name, path string) string {
 	if name == "" {
 		name = "app"
 	}
-	dir := safePath(r.workdir, path)
+	dir, perr := r.safe(path)
+	if perr != nil {
+		return "error: " + perr.Error()
+	}
 	if dir == r.workdir || path == "" {
 		dir = filepath.Join(r.workdir, name)
 	}
@@ -308,6 +330,56 @@ func (r *toolRunner) scaffold(kind, name, path string) string {
 	}
 	write("README.md", "# "+name+"\n\nBuilt by Muse99.\n\nRun: see the project files.\n")
 	return "scaffolded " + kind + " app at " + dir
+}
+
+// safe resolves a tool path. In the desktop app (confine) the result
+// must stay inside the work folder: absolute paths elsewhere, "..", and
+// symlinks that lead out are refused.
+func (r *toolRunner) safe(p string) (string, error) {
+	r.wdMu.RLock()
+	wd := r.workdir
+	r.wdMu.RUnlock()
+	full := safePath(wd, p)
+	if !r.confine {
+		return full, nil
+	}
+	if !insideDir(wd, full) {
+		return "", fmt.Errorf("%s is outside the work folder %s. Only files in the work folder can be used (change it in Settings > Work folder)", full, wd)
+	}
+	return full, nil
+}
+
+// insideDir reports whether path is dir or below it, after following
+// symlinks of the parts that exist.
+func insideDir(dir, path string) bool {
+	real := func(p string) string {
+		p = filepath.Clean(p)
+		rest := ""
+		for {
+			if rp, err := filepath.EvalSymlinks(p); err == nil {
+				return filepath.Join(rp, rest)
+			}
+			parent := filepath.Dir(p)
+			if parent == p {
+				return filepath.Join(p, rest)
+			}
+			rest = filepath.Join(filepath.Base(p), rest)
+			p = parent
+		}
+	}
+	d, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	pa, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(real(d), real(pa))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func safePath(workdir, p string) string {

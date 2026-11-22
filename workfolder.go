@@ -49,9 +49,9 @@ func cleanWorkdir(p string) (string, string) {
 }
 
 func (r *toolRunner) setWorkdir(d string) {
-	r.shellMu.Lock()
+	r.wdMu.Lock()
 	r.workdir = d
-	r.shellMu.Unlock()
+	r.wdMu.Unlock()
 }
 
 // handleWorkdir: GET → current folder; POST {path} → use it (live, and saved).

@@ -39,7 +39,7 @@ Download `Muse99.exe` from the latest release and double-click it. It opens Muse
 
 **Any other local program:** Settings → **Local model** → *Find local servers* finds LM Studio (1234), Ollama (11434), llama.cpp / LocalAI (8080), Jan (1337), vLLM (8000) and KoboldCpp (5001) and lists their models; click one to use it. For anything else type its address (e.g. `127.0.0.1:5000`) and press *Check address*, or pick a provider in **Provider & model** and enter the base URL and model by hand.
 
-**Your own folder:** Settings → **Work folder** → *Choose folder…* (or type the path) → *Use this folder*. Muse99 reads, creates and edits files only inside that folder, and shell commands run there. It is remembered; the default is `%USERPROFILE%\Muse99`. Memory stays in `%USERPROFILE%\.muse99`.
+**Your own folder:** Settings → **Work folder** → *Choose folder…* (or type the path) → *Use this folder*. In the desktop app the file tools can only reach that folder (other paths, `..` and links out of it are refused). Shell commands start there, but with **Allow shell** on they can reach the whole computer, so leave it off unless you need it. It is remembered; the default is `%USERPROFILE%\Muse99`. Memory stays in `%USERPROFILE%\.muse99`.
 
 **Internet search:** built in, nothing to set up. `web_search` returns clean results (DuckDuckGo, Bing as fallback) and `fetch_url` reads a page. The model must support tool calls (OxCoder, Qwen 3 and most modern models do). For more reliable search set a free Brave Search API key as `MUSE_BRAVE_KEY` (in `%USERPROFILE%\.muse99\.env`).
 

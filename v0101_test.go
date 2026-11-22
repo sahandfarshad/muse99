@@ -44,3 +44,29 @@ func TestV0101Workdir(t *testing.T) {
 		t.Fatal("list after setWorkdir")
 	}
 }
+
+func TestV0102Confine(t *testing.T) {
+	d := t.TempDir()
+	out := t.TempDir()
+	_ = os.WriteFile(filepath.Join(out, "secret.txt"), []byte("s"), 0o644)
+	_ = os.Symlink(out, filepath.Join(d, "link"))
+	r := &toolRunner{workdir: d, confine: true}
+	for _, p := range []string{filepath.Join(out, "secret.txt"), "../" + filepath.Base(out) + "/secret.txt", "link/secret.txt"} {
+		if res := r.run("read_file", `{"path":`+strconvQuote(p)+`}`); !strings.Contains(res, "outside the work folder") {
+			t.Fatalf("%s escaped: %s", p, res)
+		}
+	}
+	if res := r.run("write_file", `{"path":"sub/new.txt","content":"hi"}`); strings.HasPrefix(res, "error") {
+		t.Fatalf("inside write: %s", res)
+	}
+	if res := r.run("write_file", `{"path":`+strconvQuote(filepath.Join(d, "abs.txt"))+`,"content":"hi"}`); strings.HasPrefix(res, "error") {
+		t.Fatalf("absolute inside: %s", res)
+	}
+	if res := r.run("list_files", `{"path":"/"}`); !strings.Contains(res, "outside") {
+		t.Fatalf("root listed: %s", res)
+	}
+	open := &toolRunner{workdir: d}
+	if res := open.run("read_file", `{"path":`+strconvQuote(filepath.Join(out, "secret.txt"))+`}`); res != "s" {
+		t.Fatalf("server mode unchanged: %s", res)
+	}
+}
