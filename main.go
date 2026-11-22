@@ -136,6 +136,19 @@ func loadConfig() Config {
 		}
 	}
 
+	// v0.10.1: the desktop app works in the folder chosen in Settings,
+	// else ~/Muse99 — not wherever the .exe was double-clicked — and
+	// keeps its memory in ~/.muse99 so changing folder keeps it.
+	if cfg.Desktop && !explicit["workdir"] && os.Getenv("MUSE_WORKDIR") == "" {
+		if d, msg := cleanWorkdir(fc.DesktopWorkdir); msg == "" {
+			cfg.Workdir = d
+		} else {
+			cfg.Workdir = defaultDesktopWorkdir()
+		}
+	}
+	if cfg.Desktop && cfg.MemoryPath == "" {
+		cfg.MemoryPath = filepath.Join(configDir(), "MEMORY.md")
+	}
 	if cfg.MemoryPath == "" {
 		cfg.MemoryPath = defaultMemoryPath(cfg.Workdir)
 	}

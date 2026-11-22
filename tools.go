@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,7 +38,7 @@ func toolDefinitions() []ToolDef {
 		def("git_run", "Run a safe git command in the workdir, e.g. status, log --oneline -10, diff --stat, add, commit -m.", map[string]any{"command": str()}, []string{"command"}),
 		def("fetch_url", "Fetch a URL as clean text (title + main text). Lightweight HTTP fetch by default.", map[string]any{"url": str()}, []string{"url"}),
 		def("browse_url", "Browse a URL and return its title and clean text. Set js=true only when the page needs JavaScript — that uses headless Chromium (~300-500 MB RAM) if installed, and returns a clear install message if it is not.", map[string]any{"url": str(), "js": boolean()}, []string{"url"}),
-		def("web_search", "Search the web (DuckDuckGo lite). Returns titles and links.", map[string]any{"query": str()}, []string{"query"}),
+		def("web_search", "Search the internet. Returns up to 8 results (title, link, snippet). Then use fetch_url to read a page.", map[string]any{"query": str()}, []string{"query"}),
 		def("scaffold_app", "Create a starter app in a folder: kind is one of go-cli, web-html, python-cli, node-express. Creates real files, README and a run script.", map[string]any{"kind": str(), "name": str(), "path": str()}, []string{"kind", "name"}),
 		def("spawn_subtask", "Split off an independent sub-task to a sub-agent. It runs its own tool loop (max 10 steps) and returns a summary. Use for parallel pieces of a big task.", map[string]any{"task": str()}, []string{"task"}),
 		def("get_time", "Get the current date and time.", map[string]any{}, []string{}),
@@ -212,18 +209,7 @@ func (r *toolRunner) run(name, argsJSON string) string {
 		return browsePage(get("url"), useJS)
 
 	case "web_search":
-		u := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(get("query"))
-		client := &http.Client{Timeout: 20 * time.Second}
-		resp, err := client.Get(u)
-		if err != nil {
-			return "error: " + err.Error()
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 20000))
-		// Lite HTML is plain — strip tags roughly and return text.
-		s := string(body)
-		s = strings.ReplaceAll(s, "<", "\n<")
-		return truncate(s, 8000)
+		return webSearch(get("query"))
 
 	case "scaffold_app":
 		return r.scaffold(get("kind"), get("name"), get("path"))

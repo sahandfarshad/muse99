@@ -38,6 +38,7 @@ type FileConfig struct {
 	UserName       string              `json:"user_name,omitempty"`
 	NameSet        bool                `json:"name_set,omitempty"`
 	Workdir        string              `json:"workdir,omitempty"`
+	DesktopWorkdir string              `json:"desktop_workdir,omitempty"`
 	Port           int                 `json:"port,omitempty"`
 	Domain         string              `json:"domain,omitempty"`
 	TLSEnabled     bool                `json:"tls_enabled,omitempty"`
