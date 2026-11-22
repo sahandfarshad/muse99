@@ -189,6 +189,8 @@ type Client struct {
 	// noReasoning (v0.9.15): this provider rejected reasoning_content
 	// in the history, so it is never sent to it again.
 	noReasoning bool
+	// lengthRetry (v0.10.4): inside the one bigger-budget retry.
+	lengthRetry bool
 }
 
 func NewClient(baseURL, apiKey, model string) *Client {
@@ -420,7 +422,21 @@ func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) 
 		}
 	}
 	if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 && out.Choices[0].FinishReason == "length" {
-		return Message{}, fmt.Errorf("the model used its whole token budget (%d) thinking and wrote no answer — raise MUSE99_MAX_TOKENS or pick a non-reasoning model", reqBody.MaxTokens)
+		// v0.10.4: a thinking model spent the whole budget thinking.
+		// Try once more with a bigger budget and keep it for this
+		// client if it works.
+		if next := biggerBudget(reqBody.MaxTokens); next > 0 && !c.lengthRetry {
+			activity.add("", "retry", fmt.Sprintf("The model thought through its whole budget (%d tokens) without answering — retrying with %d", reqBody.MaxTokens, next), "", false)
+			prev := c.MaxTokens
+			c.MaxTokens, c.lengthRetry = next, true
+			m, err := c.chatOnce(messages, tools)
+			c.lengthRetry = false
+			if err != nil {
+				c.MaxTokens = prev
+			}
+			return m, err
+		}
+		return Message{}, fmt.Errorf("the model used its whole token budget (%d) thinking and wrote no answer — raise \"Reply budget\" in Settings or pick a non-reasoning model", reqBody.MaxTokens)
 	}
 	return msg, nil
 }
@@ -429,7 +445,10 @@ func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) 
 // included. Reasoning models spend a lot of it before answering, so
 // the default is 8192. Override with MUSE99_MAX_TOKENS (256..200000).
 func maxTokens() int {
-	n := 8192
+	if n := replyTokens.Load(); n > 0 {
+		return int(n)
+	}
+	n := defaultReplyTokens
 	if v := strings.TrimSpace(os.Getenv("MUSE99_MAX_TOKENS")); v != "" {
 		if x, err := strconv.Atoi(v); err == nil && x >= 256 && x <= 200000 {
 			n = x

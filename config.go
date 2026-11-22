@@ -40,6 +40,7 @@ type FileConfig struct {
 	Workdir        string              `json:"workdir,omitempty"`
 	DesktopWorkdir string              `json:"desktop_workdir,omitempty"`
 	ChatSteps      int                 `json:"chat_steps,omitempty"`
+	ReplyTokens    int                 `json:"reply_tokens,omitempty"`
 	Port           int                 `json:"port,omitempty"`
 	Domain         string              `json:"domain,omitempty"`
 	TLSEnabled     bool                `json:"tls_enabled,omitempty"`
@@ -283,6 +284,7 @@ func syncTopLevel(fc FileConfig) FileConfig {
 func applyFileConfig(cfg *Config, fc FileConfig) {
 	fc.ensureProviders()
 	setChatStepLimit(fc.ChatSteps)
+	setReplyTokens(fc.ReplyTokens)
 	p := fc.activeProvider()
 	if p.BaseURL != "" {
 		cfg.BaseURL = p.BaseURL
