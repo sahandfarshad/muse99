@@ -66,6 +66,9 @@ type FileConfig struct {
 	ThinkingKeep string `json:"thinking_keep,omitempty"`
 	// v0.9.17: the user's price per 1M tokens for each model id.
 	Prices map[string]ModelPrice `json:"prices,omitempty"`
+	// v0.11.0: models the user starred in a provider tab; they make
+	// up the model menu above the chat.
+	Favorites []ModelRef `json:"favorites,omitempty"`
 }
 
 // Provider presets. All are OpenAI-compatible /chat/completions endpoints,
@@ -75,6 +78,7 @@ func providerPresets() []Provider {
 		{Name: "spark", BaseURL: "https://api.meta.ai/v1", Model: "muse-spark-1.3"},
 		{Name: "openai", BaseURL: "https://api.openai.com/v1", Model: "gpt-5"},
 		{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", Model: "gemini-2.5-flash"},
+		{Name: "anthropic", BaseURL: "https://api.anthropic.com/v1", Model: "claude-sonnet-4-5"},
 		{Name: "openrouter", BaseURL: "https://openrouter.ai/api/v1", Model: "openai/gpt-5"},
 		{Name: "lmstudio", BaseURL: "http://127.0.0.1:1234/v1", Model: "", APIKey: "lm-studio"},
 		{Name: "ollama", BaseURL: "http://localhost:11434/v1", Model: "llama3.1", APIKey: "ollama"},

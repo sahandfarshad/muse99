@@ -1201,7 +1201,8 @@ func TestNoModelTextInputInSettingsHTML(t *testing.T) {
 	if strings.Contains(html, "model-datalist") {
 		t.Fatal("Settings must not contain the model datalist dropdown any more")
 	}
-	for _, want := range []string{`id="model-list"`, `id="fetch-models-btn"`, `id="test-all-btn"`, `id="manual-model-box"`, `id="manual-model"`, "Set active", "Test all", "first 20"} {
+	// v0.11.0: provider tabs; the model list is drawn per tab by JS.
+	for _, want := range []string{`id="ptabs"`, `id="ppane"`, `id="pv-list"`, `data-pact="testall"`, `id="pv-manual"`, "Test all", "+ New", `data-mact="star"`} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("Settings HTML should contain %q", want)
 		}
@@ -1397,11 +1398,13 @@ func TestSettingsLoadDoesNotAutoFetchModels(t *testing.T) {
 	// The loadSettings() ending that used to fire a live fetch on
 	// every Settings open must be gone (the provider-change
 	// handler still refreshes — that one is an explicit action).
-	if strings.Contains(webHTML, "press Fetch models.','');}refreshModelList();}") {
-		t.Fatal("loadSettings must not auto-fetch the model list when Settings opens — Fetch models is an explicit button")
+	// v0.11.0: loadSettings ends by drawing the provider tabs without
+	// waiting on them; a tab loads its list in the background.
+	if !strings.Contains(webHTML, "j.reply_tokens||8192;loadProviders(true);}") {
+		t.Fatal("loadSettings should end by drawing the provider tabs, not awaiting a model fetch")
 	}
-	if !strings.Contains(webHTML, "press Fetch models.','');}}") {
-		t.Fatal("loadSettings should end after showing the cached-list note")
+	if strings.Contains(webHTML, "await loadProviders(true);}async function saveSettings") {
+		t.Fatal("loadSettings must not await the model list")
 	}
 }
 
@@ -1463,8 +1466,8 @@ func TestMenuExitZero(t *testing.T) {
 // it in node with stubbed browser globals (scripts/check-web-js.js),
 // proving it loads, defines its functions, and fills Settings in.
 func TestWebPageScriptRuns(t *testing.T) {
-	if strings.Count(webHTML, "let allModels=") != 1 {
-		t.Fatalf("page script must declare allModels exactly once, found %d", strings.Count(webHTML, "let allModels="))
+	if strings.Count(webHTML, "let provTabs=") != 1 {
+		t.Fatalf("page script must declare provTabs exactly once, found %d", strings.Count(webHTML, "let provTabs="))
 	}
 	node, err := exec.LookPath("node")
 	if err != nil {

@@ -98,6 +98,12 @@ func isGeminiBase(baseURL, provider string) bool {
 		strings.Contains(strings.ToLower(baseURL), "generativelanguage.googleapis.com")
 }
 
+// isAnthropicBase reports whether a base URL / provider is Anthropic.
+func isAnthropicBase(baseURL, provider string) bool {
+	return strings.ToLower(strings.TrimSpace(provider)) == "anthropic" ||
+		strings.Contains(strings.ToLower(baseURL), "api.anthropic.com")
+}
+
 // parseModelsResponse parses a provider's model list, accepting the
 // shapes providers actually return:
 //   - OpenAI: {"data": [{"id": "...", "owned_by": "..."}]}
@@ -190,6 +196,12 @@ func suggestedModelsFor(provider string) []ModelInfo {
 			{ID: "gemini-2.5-pro", OwnedBy: "google"},
 			{ID: "gemini-2.0-flash", OwnedBy: "google"},
 		}
+	case "anthropic":
+		return []ModelInfo{
+			{ID: "claude-sonnet-4-5", OwnedBy: "anthropic"},
+			{ID: "claude-opus-4-1", OwnedBy: "anthropic"},
+			{ID: "claude-haiku-4-5", OwnedBy: "anthropic"},
+		}
 	case "spark":
 		return []ModelInfo{
 			{ID: "muse-spark-1.3", OwnedBy: "meta"},
@@ -265,6 +277,12 @@ func fetchModelsFromURL(url, apiKey, provider string) ([]ModelInfo, error) {
 		// "ollama" there, which is harmless to send. Skip obviously
 		// placeholder keys so a local server is not confused by them.
 		if apiKey != "" && apiKey != "ollama" {
+			if isAnthropicBase(url, provider) {
+				// Anthropic's model list wants its own headers; chat
+				// (OpenAI-compatible) takes the Bearer key.
+				req.Header.Set("x-api-key", apiKey)
+				req.Header.Set("anthropic-version", "2023-06-01")
+			}
 			if useGoogKey {
 				req.Header.Set("x-goog-api-key", apiKey)
 			} else {
@@ -332,7 +350,7 @@ func needsAPIKey(baseURL, provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "ollama", "custom":
 		return false
-	case "spark", "openai", "gemini", "openrouter":
+	case "spark", "openai", "gemini", "openrouter", "anthropic":
 		return true
 	}
 	b := strings.ToLower(strings.TrimSpace(baseURL))

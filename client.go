@@ -285,6 +285,9 @@ func (c *Client) chatOnce(messages []Message, tools []ToolDef) (Message, error) 
 			} else {
 				req.Header.Set("Authorization", "Bearer "+c.APIKey)
 			}
+			if isAnthropicBase(c.BaseURL, c.Provider) {
+				req.Header.Set("x-api-key", c.APIKey)
+			}
 		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {

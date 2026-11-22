@@ -17,8 +17,8 @@ That downloads the pre-built binary for your server (amd64 or arm64) from the la
 Then the installer does the rest by itself: it **starts the web UI** (default port **3759**) and **opens the SSH menu**, with the web UI link on top of the menu. No terminal setup is needed — the API key is set inside the web UI:
 
 1. Open the web UI link from the top of the menu (e.g. `http://192.168.1.10:3759`).
-2. Go to **Settings → Provider & model**, pick your provider, paste your API key.
-3. Press **Fetch models**, choose a model, press **Test** to check it works, then **Save**.
+2. Go to **Settings → Providers & models**, open your provider's tab (Gemini, OpenAI, Anthropic, or **+ New** for any OpenAI-compatible API), paste your API key and press **Save key**.
+3. All its models appear: press **Test** (or **Test all**), then **Use**. Star (☆) the models you like: they become the model menu above the chat.
 
 That is the whole setup. Chat works right after that. (If you run the installer with no terminal attached — CI, a piped run — it starts the web UI in the background, prints the address, and exits instead of hanging. Run `muse99` later to open the menu. Advanced users can still pass a key for one run with `MODEL_API_KEY=your-key muse99 --menu=false`, but the web UI is the supported way.)
 
@@ -37,7 +37,7 @@ Download `Muse99.exe` from the latest release and double-click it. It opens Muse
 
 **LM Studio, automatically:** start LM Studio's server (Developer tab → Start Server, port 1234) with a model such as OxCoder-9B. When no model is set up yet, Muse99 connects to it by itself at start, picking the loaded model first.
 
-**Any other local program:** Settings → **Local model** → *Find local servers* finds LM Studio (1234), Ollama (11434), llama.cpp / LocalAI (8080), Jan (1337), vLLM (8000) and KoboldCpp (5001) and lists their models; click one to use it. For anything else type its address (e.g. `127.0.0.1:5000`) and press *Check address*, or pick a provider in **Provider & model** and enter the base URL and model by hand.
+**Any other local program:** Settings → **Local model** → *Find local servers* finds LM Studio (1234), Ollama (11434), llama.cpp / LocalAI (8080), Jan (1337), vLLM (8000) and KoboldCpp (5001) and lists their models; click one to use it. For anything else type its address (e.g. `127.0.0.1:5000`) and press *Check address*, or add it as a **+ New** tab in **Providers & models** with its base URL.
 
 **Your own folder:** Settings → **Work folder** → *Choose folder…* (or type the path) → *Use this folder*. In the desktop app the file tools can only reach that folder (other paths, `..` and links out of it are refused). Shell commands start there, but with **Allow shell** on they can reach the whole computer, so leave it off unless you need it. It is remembered; the default is `%USERPROFILE%\Muse99`. Memory stays in `%USERPROFILE%\.muse99`.
 
@@ -143,7 +143,7 @@ Why bbolt and not SQLite: the current SQLite driver (modernc.org/sqlite v1.62) n
 
 ## Models — fetch, click to test, set active
 
-You never type a model name. In web **Settings → Provider & model**, choose a provider, paste its API key, press **Fetch models** — and the provider's own list appears as clickable rows. Click a row (or its **Test** button) and Muse99 sends one tiny message ("Reply with the single word OK") to that model and shows, right on the row, whether it answers, how fast, and what it replied. Press **Set active** on the one you want and that is the model Muse99 chats with from then on — the row gets an ACTIVE badge and the header updates at once. **Test all** tests the first 20 models one by one, so you can see at a glance which ones work. Type in the filter box to narrow a long list.
+You never type a model name. In web **Settings → Providers & models** every provider has its own tab (Gemini, OpenAI and Anthropic are always there; **+ New** adds your own with a name, base URL and key). Save the key and the provider's own list appears as rows. Click a row (or its **Test** button) and Muse99 sends one tiny message ("Reply with the single word OK") to that model and shows, right on the row, whether it answers, how fast, and what it replied. Press **Use** on the one you want and that is the model Muse99 chats with from then on — the row gets an IN USE badge. **Test all** tests every model in the list (three at a time; Stop testing ends it). The ☆ star on a row adds the model to the menu above the chat. Type in the filter box to narrow a long list.
 
 The only typing left is a fallback that stays hidden until you need it: if Fetch returns no models at all, a link appears — "Fetch didn't return any models? Enter one manually" — and only then can you type a name.
 

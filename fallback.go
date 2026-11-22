@@ -89,6 +89,10 @@ func (s *webServer) handleModelFallback(w http.ResponseWriter, r *http.Request) 
 func (s *webServer) modelMenuJSON() (recent []ModelRef, fallback *ModelRef) {
 	fc := loadFileConfig()
 	recent = append([]ModelRef{}, fc.RecentModels...)
+	if len(fc.Favorites) > 0 {
+		// v0.11.0: starred models are the menu.
+		recent = append([]ModelRef{}, fc.Favorites...)
+	}
 	has := func(p, m string) bool {
 		for _, r := range recent {
 			if r.Provider == p && r.Model == m {
