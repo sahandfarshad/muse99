@@ -70,3 +70,20 @@ func TestV0102Confine(t *testing.T) {
 		t.Fatalf("server mode unchanged: %s", res)
 	}
 }
+
+func TestV0103StepLimit(t *testing.T) {
+	setChatStepLimit(0)
+	t.Setenv("MUSE_CHAT_STEPS", "")
+	if chatStepLimit() != 60 {
+		t.Fatal("default")
+	}
+	t.Setenv("MUSE_CHAT_STEPS", "1000")
+	if chatStepLimit() != 300 {
+		t.Fatal("env clamp")
+	}
+	setChatStepLimit(2)
+	if chatStepLimit() != 5 {
+		t.Fatal("min clamp")
+	}
+	setChatStepLimit(0)
+}

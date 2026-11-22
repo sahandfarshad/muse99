@@ -432,7 +432,7 @@ func withContext(messages []Message) []Message {
 }
 
 // runTurn sends one user message and loops through tool calls
-// until the model gives a final text answer (max 20 steps).
+// until the model gives a final text answer (max chatStepLimit steps).
 func runTurn(client *Client, runner *toolRunner, tools []ToolDef, messages *[]Message, input string) string {
 	reply, _ := runTurnDetailed(client, runner, tools, messages, input)
 	return reply
@@ -461,7 +461,8 @@ func runTurnWithContext(client, fallback *Client, runner *toolRunner, tools []To
 		activity.add("chat", "error", "Stopped by you", "", false)
 		return fmt.Sprintf("⏹ Stopped by you after %d tool steps. What was done so far is saved in this chat; send \"continue\" to go on.", len(used)), used
 	}
-	for step := 0; step < 20; step++ {
+	limit := chatStepLimit()
+	for step := 0; step < limit; step++ {
 		if ctl.checkpoint("chat") != nil {
 			return stopped()
 		}
@@ -523,8 +524,8 @@ func runTurnWithContext(client, fallback *Client, runner *toolRunner, tools []To
 			})
 		}
 	}
-	activity.add("chat", "error", "Stopped after 20 tool steps", "", false)
-	return "I did a lot of tool steps and stopped — try breaking the task into smaller pieces.", used
+	activity.add("chat", "error", fmt.Sprintf("Paused after %d steps", limit), "", false)
+	return stepLimitReply(client, messages, limit), used
 }
 
 var _ = filepath.Join

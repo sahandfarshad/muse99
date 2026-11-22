@@ -39,6 +39,7 @@ type FileConfig struct {
 	NameSet        bool                `json:"name_set,omitempty"`
 	Workdir        string              `json:"workdir,omitempty"`
 	DesktopWorkdir string              `json:"desktop_workdir,omitempty"`
+	ChatSteps      int                 `json:"chat_steps,omitempty"`
 	Port           int                 `json:"port,omitempty"`
 	Domain         string              `json:"domain,omitempty"`
 	TLSEnabled     bool                `json:"tls_enabled,omitempty"`
@@ -281,6 +282,7 @@ func syncTopLevel(fc FileConfig) FileConfig {
 // applyFileConfig copies the persisted provider / web settings into cfg.
 func applyFileConfig(cfg *Config, fc FileConfig) {
 	fc.ensureProviders()
+	setChatStepLimit(fc.ChatSteps)
 	p := fc.activeProvider()
 	if p.BaseURL != "" {
 		cfg.BaseURL = p.BaseURL
